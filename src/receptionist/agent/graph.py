@@ -81,5 +81,8 @@ def build_graph(
         "safety", lambda s: END if s["emergency"] else "agent", {END: END, "agent": "agent"}
     )
     graph.add_conditional_edges("agent", tools_condition)
-    graph.add_edge("tools", "agent")
+    # After end_call the call is over: no further model call.
+    graph.add_conditional_edges(
+        "tools", lambda _: END if ctx.end_requested else "agent", {END: END, "agent": "agent"}
+    )
     return graph.compile(checkpointer=InMemorySaver())

@@ -4,6 +4,7 @@ Every tool returns a short plain-text string (at most 400 characters) for the mo
 paraphrase aloud. Tool results never contain a date of birth, and nothing here logs one.
 """
 
+import asyncio
 import datetime as _dt
 import functools
 import logging
@@ -529,14 +530,23 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         action: Callable[[], Awaitable[Any]], done: str, kind: Literal["hold", "cancel"]
     ) -> str:
         """Runs a booking write once, never retrying. Pending state is cleared only when the
-        outcome is known: after Unavailable the write may have gone through."""
-        try:
-            await action()
-        except Unavailable:
-            log.warning("%s outcome unknown after Unavailable", kind)
+        outcome is known: after Unavailable, or a cancellation (the caller cut the turn off),
+        the write may have gone through."""
+
+        def mark_unknown() -> None:
             pending = ctx.pending_hold if kind == "hold" else ctx.pending_cancel
             if pending is not None:
                 pending.outcome_unknown = True
+
+        try:
+            await action()
+        except asyncio.CancelledError:
+            log.warning("%s outcome unknown after cancellation", kind)
+            mark_unknown()
+            raise
+        except Unavailable:
+            log.warning("%s outcome unknown after Unavailable", kind)
+            mark_unknown()
             return UNKNOWN_OUTCOME
         except (Conflict, BadRequest, NotFound) as exc:
             if kind == "hold":

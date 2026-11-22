@@ -24,6 +24,9 @@ from receptionist.config import Settings
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 MAX_TOKENS = 4096
 REQUEST_TIMEOUT_S = 30.0
+# One retry covers a transient overload; with the 30 s timeout the caller hears the
+# apology within about 60 s in the worst case instead of sitting through 3 attempts.
+MAX_RETRIES = 1
 
 
 def make_llm(settings: Settings) -> BaseChatModel:
@@ -38,5 +41,6 @@ def make_llm(settings: Settings) -> BaseChatModel:
         betas=[FALLBACK_BETA],
         model_kwargs={"fallbacks": "default"},
         default_request_timeout=REQUEST_TIMEOUT_S,
+        max_retries=MAX_RETRIES,
         **kwargs,
     )

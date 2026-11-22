@@ -1,5 +1,6 @@
 """In-memory fakes for the agent tests. They record every call they receive."""
 
+import inspect
 import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
@@ -98,7 +99,9 @@ class Recorder:
         if isinstance(r, Exception):
             raise r
         if callable(r):
-            return r(*args, **kwargs)
+            r = r(*args, **kwargs)
+            if inspect.isawaitable(r):
+                r = await r
         return r
 
 

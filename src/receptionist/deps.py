@@ -19,7 +19,12 @@ def build_deps(settings: Settings) -> AppDeps:
     (the Postgres pool) or first use (Redis, HTTP). Unconfigured dependencies are None and
     report "disabled" in /api/health; outside APP_ENV=test the settings require them all."""
     http = make_http_client()
-    redis_client = redis.from_url(settings.redis_url) if settings.redis_url else None
+    # Short socket timeouts: Guards fail open, so a dead Redis must fail fast, not stall a call.
+    redis_client = (
+        redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=1)
+        if settings.redis_url
+        else None
+    )
     directory = PatientDirectory(settings.database_url) if settings.database_url else None
     guards = Guards(redis_client, settings)
     express = (

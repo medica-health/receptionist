@@ -1,3 +1,4 @@
+import asyncio
 from datetime import date
 
 import pytest
@@ -205,13 +206,14 @@ async def test_end_call_yields_end():
                 content="Thank you for calling. Goodbye.",
                 tool_calls=[{"name": "end_call", "args": {}, "id": "e1"}],
             ),
-            say(""),
         ]
     )
     out = await turn(s, "that's all, bye")
     assert out[-1] == Speech("end")
     assert kinds(out).count("end") == 1
     assert spoken(out) == "Thank you for calling. Goodbye."
+    # The graph ends after the end_call tool: no further model call.
+    assert len(model(s).calls) == 1
 
 
 # ---------------------------------------------------------------- language
@@ -310,6 +312,8 @@ async def interrupt_at_filler(s: CallSession, text: str) -> None:
 async def test_interrupted_turn_still_screens_the_next_utterance():
     s = await start(script=[call("list_specializations")])
     await interrupt_at_filler(s, "what do you offer")
+    # Closing respond tore the graph run down; no task is left streaming in the background.
+    assert asyncio.all_tasks() == {asyncio.current_task()}
     out = await turn(s, "I have chest pain")
     assert spoken(out) == EMERGENCY_MESSAGE["en"]
     assert len(model(s).calls) == 1
@@ -336,3 +340,50 @@ async def test_blank_input_is_ignored(text):
     out = await turn(s, text)
     assert out == []
     assert s.ctx.turn == 0
+
+
+async def test_interrupt_during_a_write_stops_it_and_marks_outcome_unknown():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def slow_book(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    s = await start(
+        candidates=[ABHINAV],
+        script=[
+            call("hold_slot", doctor_id="d1", clinic_id="c1", start_at="2026-11-24T10:00:00+05:30"),
+            say("Dr. Meera Rao on Tuesday at 10 AM. Shall I book it?"),
+            call("book_appointment"),
+            say("I'll check your appointments first."),
+        ],
+    )
+    s.ctx.verified = ABHINAV
+    s.deps.express.responses["book"] = slow_book
+    await turn(s, "book Dr Rao on Tuesday at 10")
+
+    stream = s.respond("yes please")
+    assert (await anext(stream)).kind == "filler"
+    pending = asyncio.ensure_future(anext(stream))
+    await asyncio.wait_for(started.wait(), 5)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    await stream.aclose()
+
+    # Teardown finished before respond returned: the write was cancelled, nothing lingers.
+    assert cancelled.is_set()
+    assert asyncio.all_tasks() == {asyncio.current_task()}
+    # The write may have reached express-api: it must not be retried blindly.
+    assert s.ctx.pending_hold is not None and s.ctx.pending_hold.outcome_unknown
+
+    out = await turn(s, "hello?")
+    assert spoken(out) == "I'll check your appointments first."
+    repair = [m for m in model(s).calls[-1] if isinstance(m, ToolMessage)][-1]
+    assert "outcome is unknown" in repair.content
+    assert "list_my_appointments" in repair.content

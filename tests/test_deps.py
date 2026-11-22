@@ -30,6 +30,9 @@ async def test_build_deps_wires_real_clients():
         assert isinstance(deps.guards, Guards)
         assert isinstance(deps.express, ExpressClient)
         assert isinstance(deps.spring, SpringClient)
+        kwargs = deps.guards._r.connection_pool.connection_kwargs
+        assert kwargs["socket_connect_timeout"] == 2
+        assert kwargs["socket_timeout"] == 1
         llm = deps.llm_factory()
         assert isinstance(llm, ChatAnthropic)
         assert llm.model == "claude-opus-5-5"
@@ -78,3 +81,23 @@ def test_lifespan_runs_startup_and_shutdown():
         assert events == ["startup"]
         assert client.get("/").status_code == 200
     assert events == ["startup", "shutdown"]
+
+
+class RecordingPool:
+    def __init__(self):
+        self.timeouts = []
+
+    def connection(self, timeout=None):
+        self.timeouts.append(timeout)
+        raise TimeoutError("pool timeout")
+
+
+async def test_directory_waits_briefly_for_a_connection():
+    directory = PatientDirectory("postgresql://u:p@127.0.0.1:1/none")
+    directory._pool = RecordingPool()
+    try:
+        await directory.find_by_phone("+919876543210")
+    except TimeoutError:
+        pass
+    assert await directory.ping() is False
+    assert directory._pool.timeouts == [3.0, 2.5]

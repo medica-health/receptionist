@@ -22,8 +22,12 @@ def test_payload_carries_model_effort_and_fallbacks():
     assert "tool_choice" not in p
 
 
-def test_streaming_is_on():
-    assert make_llm(Settings()).streaming is True
+def test_streaming_is_on_with_bounded_retries_and_timeout():
+    llm = make_llm(Settings())
+    assert llm.streaming is True
+    # Worst case before the caller hears the apology: 2 attempts x 30 s.
+    assert llm.max_retries == 1
+    assert llm.default_request_timeout == 30.0
 
 
 def test_system_cache_control_reaches_the_payload():

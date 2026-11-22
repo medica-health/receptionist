@@ -33,9 +33,11 @@ class PatientDirectory:
         except Exception:
             return False
 
-    async def find_by_phone(self, e164: str) -> list[Candidate]:
+    async def find_by_phone(self, e164: str, timeout: float = 3.0) -> list[Candidate]:
+        """Candidates on this number. Waits at most `timeout` seconds for a pooled connection,
+        so a database outage can't leave the caller in silence."""
         params = {"key": match_key(e164), "indian": e164.startswith("+91")}
-        async with self._pool.connection() as conn:
+        async with self._pool.connection(timeout=timeout) as conn:
             cur = await conn.execute(_SQL, params)
             rows = await cur.fetchall()
         return [Candidate(id=r[0], full_name=r[1], email=r[2], dob=r[3]) for r in rows]

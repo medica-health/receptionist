@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -29,7 +30,10 @@ APOLOGY: dict[Lang, str] = {
     "en": "Sorry, I'm having trouble right now. Could you say that again?",
     "hi": "माफ़ कीजिए, अभी थोड़ी दिक्कत हो रही है। क्या आप फिर से बता सकते हैं?",
 }
-INTERRUPTED = "Not run: the caller interrupted before this tool ran. Ask again if still needed."
+INTERRUPTED = (
+    "Interrupted by the caller; the outcome is unknown. Check (for example with "
+    "list_my_appointments) before retrying."
+)
 
 
 @dataclass
@@ -150,30 +154,34 @@ class CallSession:
         inputs.append(HumanMessage(content=text))
         said = False
         filler = False
+        stream = self.graph.astream(
+            {"messages": inputs}, self.config, stream_mode=["messages", "updates"]
+        )
         try:
-            async for mode, chunk in self.graph.astream(
-                {"messages": inputs}, self.config, stream_mode=["messages", "updates"]
-            ):
-                if mode == "updates":
-                    safety = chunk.get("safety") if isinstance(chunk, dict) else None
-                    if safety and safety.get("emergency"):
-                        for message in safety.get("messages", []):
-                            said = True
-                            yield Speech("token", _text(message.content))
-                    # switch_language changes the language inside the tools node.
-                    if switch := language_change():
-                        yield switch
-                    continue
-                message, meta = chunk
-                if meta.get("langgraph_node") != "agent" or not isinstance(message, AIMessage):
-                    continue
-                if piece := _text(message.content):
-                    said = True
-                    yield Speech("token", piece)
-                starts_tool = getattr(message, "tool_call_chunks", None) or message.tool_calls
-                if starts_tool and not said and not filler:
-                    filler = True
-                    yield Speech("filler", FILLER[ctx.language.current])
+            # aclosing: if this generator is closed or cancelled, the graph run (and any
+            # tool it started) is torn down before respond returns, not left running.
+            async with aclosing(stream):
+                async for mode, chunk in stream:
+                    if mode == "updates":
+                        safety = chunk.get("safety") if isinstance(chunk, dict) else None
+                        if safety and safety.get("emergency"):
+                            for message in safety.get("messages", []):
+                                said = True
+                                yield Speech("token", _text(message.content))
+                        # switch_language changes the language inside the tools node.
+                        if switch := language_change():
+                            yield switch
+                        continue
+                    message, meta = chunk
+                    if meta.get("langgraph_node") != "agent" or not isinstance(message, AIMessage):
+                        continue
+                    if piece := _text(message.content):
+                        said = True
+                        yield Speech("token", piece)
+                    starts_tool = getattr(message, "tool_call_chunks", None) or message.tool_calls
+                    if starts_tool and not said and not filler:
+                        filler = True
+                        yield Speech("filler", FILLER[ctx.language.current])
         except Exception as exc:
             # Never log the message: it may carry what the caller said.
             log.warning("turn failed call=%s: %s", ctx.call_sid, type(exc).__name__)
