@@ -16,7 +16,12 @@ from zoneinfo import ZoneInfo
 from langchain_core.tools import BaseTool, StructuredTool, ToolException
 from pydantic import BaseModel, Field
 
-from receptionist.agent.context import CallContext, PendingCancel, PendingHold
+from receptionist.agent.context import (
+    CallContext,
+    PendingCancel,
+    PendingHold,
+    PendingRegistration,
+)
 from receptionist.agent.safety import EMERGENCY_MESSAGE, Lang, detect_emergency
 from receptionist.agent.speech import speak_date, speak_time, speak_when
 from receptionist.clients.errors import ApiError, BadRequest, Conflict, NotFound, Unavailable
@@ -52,10 +57,15 @@ CONFIRM_FIRST = (
     "Confirm first: read the details back to the caller and wait for their yes in their next "
     "reply before calling this."
 )
+CHECK_FIRST = (
+    "The last attempt's outcome is unknown, so it won't be repeated. Please check your "
+    "appointments first with list_my_appointments, then start again if it isn't there."
+)
 TAKEN = "That time was just taken by someone else. Offer to find another time."
 GENERAL_TOOLS = frozenset(
     {
         "verify_identity",
+        "prepare_registration",
         "register_patient",
         "list_specializations",
         "find_doctors",
@@ -66,7 +76,7 @@ GENERAL_TOOLS = frozenset(
         "end_call",
     }
 )
-_IDENTITY_TOOLS = frozenset({"verify_identity", "register_patient"})
+_IDENTITY_TOOLS = frozenset({"verify_identity", "prepare_registration", "register_patient"})
 
 
 def _utcnow() -> datetime:
@@ -266,18 +276,12 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             ctx.locked = True
             return LOCKED
         if result.outcome is Outcome.UNVERIFIABLE:
-            return (
-                "I can't verify that account over the phone. Please use the MediCare app. "
-                "I can still help with doctors and clinics."
-            )
+            return "I can't verify this over the phone. Please use the MediCare app."
         ctx.not_found_seen = True
-        return (
-            "I couldn't find that name with this number. If you're new, I can register you. "
-            "Ask whether they'd like to register, or whether they're already registered under "
-            "another name."
-        )
+        return "I couldn't verify that. If you're new to MediCare, I can register you."
 
-    async def register_patient(full_name: str, dob: date) -> str:
+    async def _registration_refusal() -> str | None:
+        """Why registration can't go ahead on this call, or None."""
         if ctx.caller_e164 is None:
             return NO_CALLER_ID
         if ctx.verified is not None:
@@ -290,22 +294,46 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
                 "Registration is only possible after verify_identity couldn't find the name. "
                 "Call verify_identity with the caller's full name and date of birth first."
             )
+        return None
+
+    async def prepare_registration(full_name: str, dob: date) -> str:
+        if refusal := await _registration_refusal():
+            return refusal
         if any(names_match(full_name, c.full_name) for c in ctx.candidates):
             return (
-                "Ask the caller if they're already registered with us. If they are, verify "
-                "them with verify_identity instead of registering again."
+                "Ask the caller whether they're already registered with MediCare. If they are, "
+                "verify them with verify_identity instead of registering again."
             )
         if not validate_dob(dob, today()):
             return "That date of birth doesn't look right. Please ask the caller for it again."
-        created = await deps.spring.create_phone_patient(
-            full_name.strip(), ctx.caller_e164, idempotency_key=ctx.call_sid
+        await _clear_pending(keep="registration")
+        ctx.pending_registration = PendingRegistration(full_name.strip(), dob, ctx.turn)
+        return (
+            f"Read back: full name {full_name.strip()}, date of birth "
+            f"{speak_date(dob, lang())}. Ask the caller to confirm; call register_patient only "
+            "after they say yes."
         )
-        who = Candidate(created["id"], created["fullName"], created["email"], dob)
+
+    async def register_patient() -> str:
+        if refusal := await _registration_refusal():
+            return refusal
+        pending = ctx.pending_registration
+        if pending is None:
+            return "Nothing is ready to register. Call prepare_registration first."
+        if pending.turn >= ctx.turn:
+            return CONFIRM_FIRST
+        assert ctx.caller_e164 is not None  # checked by _registration_refusal
+        # Idempotent on the call SID, so a retry after Unavailable can't create a duplicate.
+        created = await deps.spring.create_phone_patient(
+            pending.full_name, ctx.caller_e164, idempotency_key=ctx.call_sid
+        )
+        ctx.pending_registration = None
+        who = Candidate(created["id"], created["fullName"], created["email"], pending.dob)
         await mark_verified(who)
         ctx.registered_this_call = True
         log.info("registered phone patient caller=%s", mask_phone(ctx.caller_e164))
         try:
-            await ctx.patient().update_profile(dob)
+            await ctx.patient().update_profile(pending.dob)
         except ApiError as exc:
             log.warning("saving DOB after registration failed: %s", exc.status)
         return f"Registered and verified as {who.full_name}. Ask how you can help."
@@ -445,6 +473,15 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             except ApiError:
                 pass  # it expires on its own
 
+    async def _clear_pending(keep: str | None = None) -> None:
+        """Only one write may wait for a yes at a time, so one "yes" can't trigger two writes."""
+        if keep != "hold":
+            await _release_pending()
+        if keep != "cancel":
+            ctx.pending_cancel = None
+        if keep != "registration":
+            ctx.pending_registration = None
+
     async def _hold(
         doctor_id: str,
         clinic_id: str,
@@ -460,7 +497,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         tz = clinic.get("timezone") or default_tz
         if start_at.tzinfo is None:
             start_at = start_at.replace(tzinfo=ZoneInfo(tz))
-        await _release_pending()
+        await _clear_pending()
         hold_id: str | None = None
         try:
             held = await session.hold(doctor_id, clinic_id, start_at)
@@ -497,6 +534,9 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             await action()
         except Unavailable:
             log.warning("%s outcome unknown after Unavailable", kind)
+            pending = ctx.pending_hold if kind == "hold" else ctx.pending_cancel
+            if pending is not None:
+                pending.outcome_unknown = True
             return UNKNOWN_OUTCOME
         except (Conflict, BadRequest, NotFound) as exc:
             if kind == "hold":
@@ -519,6 +559,8 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             return "Nothing is ready to book. Find a slot and call hold_slot first."
         if hold.appointment_id:
             return "This is a reschedule; use confirm_reschedule instead."
+        if hold.outcome_unknown:
+            return CHECK_FIRST
         if hold.turn >= ctx.turn:
             return CONFIRM_FIRST
         return await _write(
@@ -550,6 +592,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         if appt is None:
             return "I couldn't find that upcoming appointment. Check list_my_appointments."
         summary = _describe(appt)
+        await _clear_pending(keep="cancel")
         ctx.pending_cancel = PendingCancel(appointment_id, summary, ctx.turn)
         return (
             f"Ready to cancel: {summary}. Read this back and ask the caller to confirm. "
@@ -561,6 +604,8 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         pending = ctx.pending_cancel
         if pending is None:
             return "Nothing is ready to cancel. Call prepare_cancel with the appointment first."
+        if pending.outcome_unknown:
+            return CHECK_FIRST
         if pending.turn >= ctx.turn:
             return CONFIRM_FIRST
         return await _write(
@@ -587,6 +632,8 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         hold = ctx.pending_hold
         if hold is None or hold.appointment_id is None:
             return "Nothing is ready to reschedule. Call reschedule_appointment first."
+        if hold.outcome_unknown:
+            return CHECK_FIRST
         if hold.turn >= ctx.turn:
             return CONFIRM_FIRST
         appointment_id = hold.appointment_id
@@ -657,11 +704,12 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
     specs: list[tuple[Callable[..., Awaitable[str]], type[BaseModel], str]] = [
         (verify_identity, IdentityArgs, "Verify the caller by full name and date of birth."),
         (
-            register_patient,
+            prepare_registration,
             IdentityArgs,
-            "Register a new patient on the caller's number. Only after verify_identity said "
-            "the name wasn't found, and after the caller confirmed the read-back.",
+            "Prepare to register a new patient on the caller's number (read back next). Only "
+            "after verify_identity couldn't verify the name.",
         ),
+        (register_patient, NoArgs, "Register the prepared patient, after the caller said yes."),
         (list_specializations, NoArgs, "List the medical specializations we offer."),
         (find_doctors, FindDoctorsArgs, "Find doctors by specialization, city, pincode, language."),
         (clinic_info, ClinicArgs, "A clinic's address and phone."),

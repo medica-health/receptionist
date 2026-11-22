@@ -1,6 +1,6 @@
 """Caller verification by name + date of birth (pure)."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
@@ -12,7 +12,7 @@ class Candidate:
     id: str
     full_name: str
     email: str
-    dob: date | None
+    dob: date | None = field(repr=False)  # never in logs or reprs
 
 
 class Outcome(StrEnum):

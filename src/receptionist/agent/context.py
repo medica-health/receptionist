@@ -1,7 +1,7 @@
 """Per-call mutable state shared by the graph and the tools."""
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 
 from langchain_core.tools import ToolException
 
@@ -13,7 +13,8 @@ from receptionist.identity.verify import Candidate, Verifier
 @dataclass
 class PendingHold:
     """A slot read back to the caller, waiting for their yes (book, or reschedule when
-    `appointment_id` is set). `turn` is the turn it was created in."""
+    `appointment_id` is set). `turn` is the turn it was created in. `outcome_unknown` is set
+    when the write was attempted but express-api didn't answer: it must not be retried."""
 
     doctor_id: str
     clinic_id: str
@@ -22,6 +23,7 @@ class PendingHold:
     summary: str
     turn: int
     appointment_id: str | None = None
+    outcome_unknown: bool = False
 
 
 @dataclass
@@ -29,23 +31,32 @@ class PendingCancel:
     appointment_id: str
     summary: str
     turn: int
+    outcome_unknown: bool = False
+
+
+@dataclass
+class PendingRegistration:
+    full_name: str = field(repr=False)
+    dob: date = field(repr=False)
+    turn: int
 
 
 @dataclass
 class CallContext:
     call_sid: str
     caller_e164: str | None
-    candidates: list[Candidate]
-    verifier: Verifier
+    candidates: list[Candidate] = field(repr=False)
+    verifier: Verifier = field(repr=False)
     language: LanguageTracker
     turn: int = 0
-    verified: Candidate | None = None
+    verified: Candidate | None = field(default=None, repr=False)
     registered_this_call: bool = False
     locked: bool = False
     pending_hold: PendingHold | None = None
     pending_cancel: PendingCancel | None = None
     emergency: bool = False
     end_requested: bool = False
+    pending_registration: PendingRegistration | None = field(default=None, repr=False)
     # Set once verify_identity returned NOT_FOUND on this call; registration requires it.
     not_found_seen: bool = False
     # Bound by build_tools; used to build the patient session.

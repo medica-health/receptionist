@@ -1,8 +1,9 @@
 from datetime import UTC, date, datetime, timedelta
 
+import pytest
 from fakes import APPOINTMENT, Harness, make_ctx, make_deps
 
-from receptionist.agent.context import PendingCancel, PendingHold
+from receptionist.agent.context import PendingCancel, PendingHold, PendingRegistration
 from receptionist.agent.tools import tools_for
 from receptionist.clients.errors import BadRequest, Conflict, Unavailable
 from receptionist.identity.verify import Candidate
@@ -14,6 +15,7 @@ SLOT = datetime(2026, 11, 24, 4, 30, tzinfo=UTC)
 
 GENERAL = {
     "verify_identity",
+    "prepare_registration",
     "register_patient",
     "list_specializations",
     "find_doctors",
@@ -22,6 +24,21 @@ GENERAL = {
     "get_available_slots",
     "switch_language",
     "end_call",
+}
+IDENTITY = {"verify_identity", "prepare_registration", "register_patient"}
+
+# Sample arguments for every patient-only tool.
+PATIENT_TOOL_ARGS = {
+    "hold_slot": {"doctor_id": "d1", "clinic_id": "c1", "start_at": SLOT.isoformat()},
+    "book_appointment": {},
+    "list_my_appointments": {"scope": "upcoming"},
+    "prepare_cancel": {"appointment_id": "a1"},
+    "cancel_appointment": {},
+    "reschedule_appointment": {"appointment_id": "a1", "start_at": SLOT.isoformat()},
+    "confirm_reschedule": {},
+    "list_prescriptions": {},
+    "read_prescription": {"prescription_id": "rx1"},
+    "resend_confirmation": {"appointment_id": "a1"},
 }
 
 
@@ -33,9 +50,17 @@ def verified(h: Harness, who: Candidate = ABHINAV) -> Harness:
 # ---------------------------------------------------------------- visibility / gating
 
 
-async def test_patient_tools_refuse_before_verify():
-    h = Harness(make_ctx(candidates=[ABHINAV]))
-    text = await h.run("list_my_appointments", scope="upcoming")
+def test_every_non_general_tool_has_sample_args():
+    assert {t.name for t in Harness().tools} - GENERAL == set(PATIENT_TOOL_ARGS)
+
+
+@pytest.mark.parametrize("name", sorted(PATIENT_TOOL_ARGS))
+async def test_patient_tools_refuse_before_verify(name):
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=5))
+    # Even with pending state planted, nothing reaches express-api before verification.
+    h.ctx.pending_hold = PendingHold("d1", "c1", SLOT, "h1", "s", 1)
+    h.ctx.pending_cancel = PendingCancel("a1", "s", 1)
+    text = await h.run(name, **PATIENT_TOOL_ARGS[name])
     assert "verif" in text.lower()
     assert h.express.calls == []
 
@@ -46,7 +71,23 @@ def test_tools_for_hides_patient_tools_until_verified():
     verified(h)
     names = {t.name for t in tools_for(h.ctx, h.tools)}
     assert {"book_appointment", "list_my_appointments", "read_prescription"} <= names
-    assert "verify_identity" not in names and "register_patient" not in names
+    assert not names & IDENTITY
+
+
+def test_tools_for_hides_identity_tools_when_locked():
+    h = Harness(make_ctx(candidates=[ABHINAV]))
+    h.ctx.locked = True
+    assert {t.name for t in tools_for(h.ctx, h.tools)} == GENERAL - IDENTITY
+
+
+def test_repr_never_contains_dob():
+    h = Harness(make_ctx(candidates=[ABHINAV, NO_DOB]))
+    h.ctx.verified = ABHINAV
+    h.ctx.pending_registration = PendingRegistration("Rohan Gupta", date(1995, 3, 4), 1)
+    text = repr(h.ctx)
+    for leak in ("1990", "1995", "dob", "Rohan"):
+        assert leak not in text
+    assert "1990" not in repr(ABHINAV) and "dob" not in repr(ABHINAV)
 
 
 # ---------------------------------------------------------------- verification
@@ -102,11 +143,11 @@ async def test_invalid_dob_is_not_a_failed_attempt():
 async def test_not_found_and_unverifiable_wording():
     h = Harness(make_ctx(candidates=[ABHINAV]))
     text = await h.run("verify_identity", full_name="Rohan Gupta", dob="1990-01-02")
-    assert text.startswith("I couldn't find that name with this number.")
+    assert text == "I couldn't verify that. If you're new to MediCare, I can register you."
     two = [NO_DOB, Candidate("u3", "Priya Sharma", "q@x.y", None)]
     h = Harness(make_ctx(candidates=two))
     text = await h.run("verify_identity", full_name="Priya Sharma", dob="1990-01-02")
-    assert "I can't verify that account over the phone" in text
+    assert text == "I can't verify this over the phone. Please use the MediCare app."
 
 
 async def test_verify_refused_without_caller_id():
@@ -120,26 +161,55 @@ async def test_verify_refused_without_caller_id():
 
 
 async def test_register_only_when_not_found():
-    h = Harness(make_ctx(candidates=[ABHINAV]))
-    text = await h.run("register_patient", full_name="Rohan Gupta", dob="1995-03-04")
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=1))
+    text = await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
+    assert "verify_identity" in text and h.ctx.pending_registration is None
+    h.ctx.turn = 2
+    assert "verify_identity" in await h.run("register_patient")
     assert h.spring.calls == []
-    assert "verify_identity" in text
     await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
-    text = await h.run("register_patient", full_name="Rohan Gupta", dob="1995-03-04")
+    text = await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
+    assert "Rohan Gupta" in text and "4 March 1995" in text
+    h.ctx.turn = 3
+    text = await h.run("register_patient")
     args, kwargs = h.spring.last("create_phone_patient")
     assert args == ("Rohan Gupta", "+919876543210")
     assert kwargs == {"idempotency_key": "CA123"}
     assert h.express.last("update_profile")[0] == (date(1995, 3, 4),)
     assert h.ctx.verified is not None and h.ctx.verified.id == "new1"
     assert h.ctx.registered_this_call is True
+    assert h.ctx.pending_registration is None
     assert "1995" not in text
 
 
-async def test_register_refused_without_caller_id():
-    h = Harness(make_ctx(caller_e164=None))
+async def test_register_requires_new_turn():
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=4))
     await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
-    text = await h.run("register_patient", full_name="Rohan Gupta", dob="1995-03-04")
+    await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
+    text = await h.run("register_patient")
+    assert "confirm first" in text.lower()
+    assert h.spring.calls == [] and h.ctx.verified is None
+    h.ctx.turn = 5
+    await h.run("register_patient")
+    assert h.spring.names() == ["create_phone_patient"]
+
+
+async def test_prepare_registration_refuses_existing_name_and_bad_dob():
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=1))
+    await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
+    text = await h.run("prepare_registration", full_name="Abhinav Singh", dob="1995-03-04")
+    assert "already registered" in text and h.ctx.pending_registration is None
+    text = await h.run("prepare_registration", full_name="Rohan Gupta", dob="2031-01-01")
+    assert "ask" in text.lower() and h.ctx.pending_registration is None
+
+
+async def test_register_refused_without_caller_id():
+    h = Harness(make_ctx(caller_e164=None, turn=1))
+    await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
+    text = await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
     assert "caller id" in text.lower()
+    h.ctx.turn = 2
+    assert "caller id" in (await h.run("register_patient")).lower()
     assert h.spring.calls == []
 
 
@@ -453,19 +523,75 @@ async def test_long_ids_are_never_cut_mid_item():
     assert shown >= 1 and (shown == 3 or f"{3 - shown} more not listed." in text)
 
 
-async def test_cancel_unavailable_keeps_pending_and_conflict_on_book_releases_hold():
+async def test_cancel_unavailable_then_book_conflict_releases_hold():
     h = verified(Harness(make_ctx(turn=1)))
     await h.run("prepare_cancel", appointment_id="a1")
     h.ctx.turn = 2
     h.express.responses["cancel"] = Unavailable(503, "down")
     assert "list_my_appointments" in await h.run("cancel_appointment")
-    assert h.ctx.pending_cancel is not None
+    assert h.ctx.pending_cancel is not None and h.ctx.pending_cancel.outcome_unknown
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
+    assert h.ctx.pending_cancel is None  # a new hold replaces any other pending write
     h.ctx.turn = 3
     h.express.responses["book"] = Conflict(409, "This time slot is no longer available")
     await h.run("book_appointment")
     assert h.express.last("release_hold")[0] == ("h1",)
-    assert h.ctx.pending_cancel is not None  # unrelated pending state untouched
+    assert h.ctx.pending_hold is None
+
+
+async def test_unknown_outcome_blocks_every_write_until_fresh_prepare():
+    h = verified(Harness(make_ctx(turn=1)))
+    await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
+    h.ctx.turn = 2
+    h.express.responses["book"] = Unavailable(503, "down")
+    await h.run("book_appointment")
+    h.ctx.turn = 3
+    del h.express.responses["book"]
+    assert "check your appointments first" in await h.run("book_appointment")
+    assert h.express.names().count("book") == 1
+    # cancel
+    await h.run("prepare_cancel", appointment_id="a1")
+    h.ctx.turn = 4
+    h.express.responses["cancel"] = Unavailable(503, "down")
+    await h.run("cancel_appointment")
+    h.ctx.turn = 5
+    assert "check your appointments first" in await h.run("cancel_appointment")
+    assert h.express.names().count("cancel") == 1
+    # reschedule
+    await h.run("reschedule_appointment", appointment_id="a1", start_at=SLOT.isoformat())
+    h.ctx.turn = 6
+    h.express.responses["reschedule"] = Unavailable(503, "down")
+    await h.run("confirm_reschedule")
+    h.ctx.turn = 7
+    assert "check your appointments first" in await h.run("confirm_reschedule")
+    assert h.express.names().count("reschedule") == 1
+    # a fresh hold starts over
+    await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
+    h.ctx.turn = 8
+    assert "booked" in (await h.run("book_appointment")).lower()
+
+
+async def test_one_yes_cannot_trigger_two_writes():
+    h = verified(Harness(make_ctx(turn=1)))
+    await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
+    await h.run("prepare_cancel", appointment_id="a1")
+    assert h.ctx.pending_hold is None
+    assert h.express.last("release_hold")[0] == ("h1",)
+    h.ctx.turn = 2
+    assert "nothing is ready" in (await h.run("book_appointment")).lower()
+    await h.run("cancel_appointment")
+    assert "book" not in h.express.names() and h.express.names().count("cancel") == 1
+
+
+async def test_prepare_registration_clears_other_pending():
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=1))
+    h.ctx.pending_cancel = PendingCancel("a1", "s", 1)
+    await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
+    await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
+    assert h.ctx.pending_cancel is None and h.ctx.pending_registration is not None
+    verified(h)
+    await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
+    assert h.ctx.pending_registration is None
 
 
 async def test_bad_dob_format_is_a_validation_message_not_a_failure():
@@ -473,3 +599,11 @@ async def test_bad_dob_format_is_a_validation_message_not_a_failure():
     text = await h.run("verify_identity", full_name="Abhinav Singh", dob="02/01/1990")
     assert "YYYY-MM-DD" in text
     assert h.ctx.verifier.failures == 0 and h.guards.failures == []
+
+
+async def test_register_without_prepare_is_refused():
+    h = Harness(make_ctx(candidates=[ABHINAV], turn=1))
+    await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
+    h.ctx.turn = 2
+    assert "prepare_registration" in await h.run("register_patient")
+    assert h.spring.calls == []

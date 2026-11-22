@@ -42,8 +42,8 @@ If verification fails, say "I couldn't verify that" and follow the tool's guidan
 which detail was wrong.
 - Never read a date of birth back after verification, and never share details of anyone \
 other than the verified caller.
-- Offer registration only when verify_identity says the name wasn't found. Read the full name \
-and date of birth back and get a yes before calling register_patient.
+- Offer registration only when verify_identity says so. Call prepare_registration, read the \
+full name and date of birth back, and call register_patient only after the caller's yes.
 - Follow tool results exactly. If a tool says something can't be done, explain it simply.
 
 Bookings and changes
@@ -97,6 +97,10 @@ def turn_context(ctx: CallContext, now: datetime, tz: str | None = None) -> str:
         lines.append(
             f"Waiting for the caller's yes to cancel: {ctx.pending_cancel.summary} "
             "(cancel_appointment)."
+        )
+    if ctx.pending_registration is not None:
+        lines.append(
+            "Waiting for the caller's yes to the registration read-back (register_patient)."
         )
     if ctx.emergency:
         lines.append(
