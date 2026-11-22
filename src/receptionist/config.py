@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     tts_voice_en: str | None = None
     tts_voice_hi: str | None = None
     stt_provider: str = "Deepgram"
-    stt_model: str = "nova-3"
+    stt_model: str = "nova-3-general"
 
     @model_validator(mode="after")
     def _require_config(self) -> Self:

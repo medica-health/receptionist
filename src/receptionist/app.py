@@ -55,26 +55,35 @@ def create_app(deps: AppDeps | None = None) -> FastAPI:
     settings: Settings = deps.settings or get_settings()
     health = deps.health or HealthChecker()
 
+    from receptionist.voice import routes as voice  # voice -> session -> this module
+
     @asynccontextmanager
-    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if deps.startup is not None:
             await deps.startup()
         try:
             yield
         finally:
+            app.state.draining = True
             if deps.shutdown is not None:
                 await deps.shutdown()
 
     app = FastAPI(title="MediCare receptionist", lifespan=lifespan)
     app.state.deps = deps
     app.state.settings = settings
+    voice.init_state(app)
+    app.include_router(voice.router)
 
     @app.get("/")
     async def root() -> dict[str, str]:
         return {"message": "Running"}
 
-    @app.get("/api/health")
-    async def api_health() -> dict[str, Any]:
+    @app.get("/api/health", response_model=None)
+    async def api_health() -> dict[str, Any] | JSONResponse:
+        if app.state.draining:
+            # The load balancer stops routing new calls here; live calls carry on.
+            data = {"environment": settings.app_env, "draining": True}
+            return _error(503, "Draining", data)
         return ok(
             "Health check",
             {"environment": settings.app_env, "dependencies": await health.status()},

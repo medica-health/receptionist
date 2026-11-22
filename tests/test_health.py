@@ -66,3 +66,20 @@ def test_unhandled_exception_returns_generic_500_envelope():
     assert body["success"] is False
     assert body["message"] == "Internal server error"
     assert "secret internal detail" not in res.text
+
+
+def test_health_503_while_draining():
+    client = make_client()
+    client.app.state.draining = True
+    res = client.get("/api/health")
+    assert res.status_code == 503
+    body = res.json()
+    assert body["success"] is False
+    assert body["data"]["draining"] is True
+
+
+def test_lifespan_shutdown_sets_draining():
+    app = create_app(AppDeps(health=FakeChecker({})))
+    with TestClient(app):
+        assert app.state.draining is False
+    assert app.state.draining is True

@@ -13,6 +13,7 @@ import uvicorn
 from receptionist.app import create_app
 from receptionist.config import get_settings
 from receptionist.deps import build_deps
+from receptionist.drain import DrainingServer
 from receptionist.session import CallSession
 
 # psycopg's async driver can't run on the Windows default ProactorEventLoop.
@@ -30,13 +31,17 @@ def run(coro: Coroutine[Any, Any, Any]) -> Any:
 
 def serve() -> None:
     settings = get_settings()
-    uvicorn.run(
-        create_app(build_deps(settings)),
+    app = create_app(build_deps(settings))
+    config = uvicorn.Config(
+        app,
         host="0.0.0.0",
         port=settings.port,
         loop=UVICORN_LOOP,
-        timeout_graceful_shutdown=840,
+        # Live calls are drained before shutdown starts (DrainingServer); this only bounds
+        # the last turns still finishing after their sockets close.
+        timeout_graceful_shutdown=90,
     )
+    DrainingServer(config, app).run()
 
 
 async def run_chat(
