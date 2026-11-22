@@ -22,7 +22,12 @@ dependencies = [
 receptionist = "receptionist.cli:main"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = [
+    "fakeredis>=2.40.0",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
 
 [build-system]
 requires = ["hatchling"]
