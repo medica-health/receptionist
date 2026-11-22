@@ -12,6 +12,7 @@ FILLER: dict[Lang, str] = {
 _LEXICON = {
     "hai", "hain", "nahi", "nahin", "mujhe", "mera", "meri", "kya", "aap", "chahiye", "karna",
     "karni", "hoon", "kal", "aaj", "ji", "theek", "kab", "kitne", "batao", "bataiye",
+    "ko", "rahi", "raha", "rahe", "mein", "saans",
 }  # fmt: skip
 _PHRASES = ("doctor sahab",)
 _WORD = re.compile(r"[a-z']+")
@@ -60,3 +61,13 @@ class LanguageTracker:
             return None
         self.current = lang
         return lang
+
+
+def emergency_language(tracker: LanguageTracker, text: str, stt_lang: str | None) -> Lang:
+    """Language for the emergency message, chosen from the utterance that triggered it, not
+    the tracker (which needs two Hindi turns to switch). A Hindi utterance also forces the
+    tracker to Hindi, so TTS switches before the message is spoken."""
+    if utterance_language(text, stt_lang) == "hi":
+        tracker.force("hi")
+        return "hi"
+    return tracker.current

@@ -6,6 +6,7 @@ from datetime import date, datetime
 from langchain_core.tools import ToolException
 
 from receptionist.agent.language import LanguageTracker
+from receptionist.agent.safety import Lang
 from receptionist.clients.express import ExpressClient, PatientSession
 from receptionist.identity.verify import Candidate, Verifier
 
@@ -55,13 +56,23 @@ class CallContext:
     pending_hold: PendingHold | None = None
     pending_cancel: PendingCancel | None = None
     emergency: bool = False
+    # Turn in which the emergency (112) message was last given; see prompts.turn_context.
+    emergency_turn: int | None = None
     end_requested: bool = False
     pending_registration: PendingRegistration | None = field(default=None, repr=False)
     # Set once verify_identity returned NOT_FOUND on this call; registration requires it.
     not_found_seen: bool = False
+    # This turn's STT language hint and the language of the caller's utterance, set by
+    # CallSession.respond before the graph runs (the safety screen and tools read them).
+    stt_lang: str | None = None
+    utterance_lang: Lang = "en"
     # Bound by build_tools; used to build the patient session.
     express: ExpressClient | None = field(default=None, repr=False)
     _session: PatientSession | None = field(default=None, repr=False)
+
+    def mark_emergency(self) -> None:
+        self.emergency = True
+        self.emergency_turn = self.turn
 
     def patient(self) -> PatientSession:
         """The express-api session of the verified caller. Fails closed when not verified."""

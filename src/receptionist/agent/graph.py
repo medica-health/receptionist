@@ -14,6 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from receptionist.agent.context import CallContext
+from receptionist.agent.language import emergency_language
 from receptionist.agent.prompts import SYSTEM_PROMPT, turn_context
 from receptionist.agent.safety import EMERGENCY_MESSAGE, detect_emergency
 from receptionist.agent.tools import tools_for
@@ -57,9 +58,10 @@ def build_graph(
         last = state["messages"][-1]
         text = last.text if isinstance(last, HumanMessage) else ""
         if detect_emergency(text):
-            ctx.emergency = True
+            ctx.mark_emergency()
+            lang = emergency_language(ctx.language, text, ctx.stt_lang)
             log.info("emergency message given call=%s turn=%s", ctx.call_sid, ctx.turn)
-            message = AIMessage(content=EMERGENCY_MESSAGE[ctx.language.current])
+            message = AIMessage(content=EMERGENCY_MESSAGE[lang])
             return {"emergency": True, "messages": [message]}
         return {"emergency": False}
 

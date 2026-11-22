@@ -14,7 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from receptionist.agent.context import CallContext
 from receptionist.agent.graph import REFUSAL_LINE, build_graph
-from receptionist.agent.language import FILLER, LanguageTracker
+from receptionist.agent.language import FILLER, LanguageTracker, utterance_language
 from receptionist.agent.safety import Lang
 from receptionist.agent.tools import ToolDeps, build_tools
 from receptionist.app import AppDeps
@@ -145,6 +145,8 @@ class CallSession:
             announced = ctx.language.current
             return Speech("switch_language", lang=announced)
 
+        ctx.stt_lang = stt_lang
+        ctx.utterance_lang = utterance_language(text, stt_lang)
         ctx.language.observe(text, stt_lang)
         if switch := language_change():
             yield switch
@@ -165,6 +167,9 @@ class CallSession:
                     if mode == "updates":
                         safety = chunk.get("safety") if isinstance(chunk, dict) else None
                         if safety and safety.get("emergency"):
+                            # A Hindi emergency forces Hindi: switch TTS before the message.
+                            if switch := language_change():
+                                yield switch
                             for message in safety.get("messages", []):
                                 said = True
                                 yield Speech("token", _text(message.content))

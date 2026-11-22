@@ -102,7 +102,13 @@ def turn_context(ctx: CallContext, now: datetime, tz: str | None = None) -> str:
         lines.append(
             "Waiting for the caller's yes to the registration read-back (register_patient)."
         )
-    if ctx.emergency:
+    if ctx.emergency and ctx.emergency_turn is not None and ctx.turn > ctx.emergency_turn + 1:
+        # The agent has had a full turn after the message to check on the caller.
+        lines.append(
+            "An emergency message (call 112) was given earlier in this call. If the caller "
+            "describes an emergency again, repeat that advice; otherwise help normally."
+        )
+    elif ctx.emergency:
         lines.append(
             "The emergency message (hang up and call 112) was already given on this call. "
             "Before anything else, gently ask whether they are safe right now. If it is an "

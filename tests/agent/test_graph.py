@@ -80,10 +80,47 @@ async def test_emergency_short_circuits():
 
 
 async def test_emergency_message_in_hindi():
+    # No forced language: a first-turn Hindi emergency must get the Hindi message.
     s = await start(script=[])
-    s.ctx.language.force("hi")
     out = await turn(s, "सीने में दर्द हो रहा है")
     assert spoken(out) == EMERGENCY_MESSAGE["hi"]
+    assert s.ctx.language.current == "hi"
+
+
+async def test_first_turn_hindi_emergency_switches_before_the_message():
+    s = await start(script=[])
+    out = await turn(s, "मेरे पिताजी को सांस नहीं आ रही", stt_lang="en-IN")
+    assert spoken(out) == EMERGENCY_MESSAGE["hi"]
+    assert out[0] == Speech("switch_language", lang="hi")
+    assert kinds(out).count("switch_language") == 1
+    assert out.index(Speech("switch_language", lang="hi")) < kinds(out).index("token")
+    assert s.ctx.language.current == "hi"
+
+
+async def test_first_turn_romanised_hindi_emergency():
+    s = await start(script=[])
+    out = await turn(s, "papa ko saans nahi aa rahi", stt_lang="en-IN")
+    assert spoken(out) == EMERGENCY_MESSAGE["hi"]
+    assert Speech("switch_language", lang="hi") in out
+
+
+async def test_english_emergency_stays_english():
+    s = await start(script=[])
+    out = await turn(s, "my father can't breathe", stt_lang="en-IN")
+    assert spoken(out) == EMERGENCY_MESSAGE["en"]
+    assert "switch_language" not in kinds(out)
+
+
+async def test_emergency_note_softens_after_one_full_turn():
+    s = await start(script=[say("Are you safe right now?"), say("Sure, which doctor?")])
+    await turn(s, "my father had a stroke")
+    await turn(s, "he is fine now, the ambulance came")
+    await turn(s, "I want to book a neurologist")
+    first, second = model(s).calls
+    assert "ask whether they are safe" in first[0].content[1]["text"]
+    later = second[0].content[1]["text"]
+    assert "ask whether they are safe" not in later
+    assert "given earlier in this call" in later
 
 
 async def test_emergency_does_not_lock_the_call():

@@ -23,6 +23,7 @@ from receptionist.agent.context import (
     PendingHold,
     PendingRegistration,
 )
+from receptionist.agent.language import emergency_language
 from receptionist.agent.safety import EMERGENCY_MESSAGE, Lang, detect_emergency
 from receptionist.agent.speech import speak_date, speak_time, speak_when
 from receptionist.clients.errors import ApiError, BadRequest, Conflict, NotFound, Unavailable
@@ -62,6 +63,7 @@ CHECK_FIRST = (
     "The last attempt's outcome is unknown, so it won't be repeated. Please check your "
     "appointments first with list_my_appointments, then start again if it isn't there."
 )
+API_FAILED = "Sorry, that didn't work on our side. Please try again later or use the MediCare app."
 TAKEN = "That time was just taken by someone else. Offer to find another time."
 GENERAL_TOOLS = frozenset(
     {
@@ -142,9 +144,14 @@ def _guarded(fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]
             return f"{Unavailable.spoken} Please try again in a moment."
         except NotFound:
             return "I couldn't find that. Please check the details with the caller."
-        except ApiError as exc:
+        except (BadRequest, Conflict) as exc:
             log.warning("tool %s failed with status %s", fn.__name__, exc.status)
             return _cap(f"Sorry, that didn't work: {exc.message}")
+        except ApiError as exc:
+            # Never speak other API messages: they can be internal (e.g. "Invalid or
+            # missing API key").
+            log.warning("tool %s failed with status %s", fn.__name__, exc.status)
+            return API_FAILED
 
     return run
 
@@ -422,8 +429,12 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
 
     async def suggest_specialization(symptoms: str) -> str:
         if detect_emergency(symptoms):
-            ctx.emergency = True
-            return f"Emergency red flag. Say this now: {EMERGENCY_MESSAGE[lang()]}"
+            ctx.mark_emergency()
+            # The model's summary may be in English even when the caller spoke Hindi.
+            if ctx.utterance_lang == "hi":
+                ctx.language.force("hi")
+            message_lang = emergency_language(ctx.language, symptoms, ctx.stt_lang)
+            return f"Emergency red flag. Say this now: {EMERGENCY_MESSAGE[message_lang]}"
         specs = await deps.express.specializations()
         text = "Choose 1-2 from this list only; never diagnose."
         for s in specs:

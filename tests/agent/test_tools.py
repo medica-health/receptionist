@@ -4,8 +4,9 @@ import pytest
 from fakes import APPOINTMENT, Harness, make_ctx, make_deps
 
 from receptionist.agent.context import PendingCancel, PendingHold, PendingRegistration
-from receptionist.agent.tools import tools_for
-from receptionist.clients.errors import BadRequest, Conflict, Unavailable
+from receptionist.agent.safety import EMERGENCY_MESSAGE
+from receptionist.agent.tools import API_FAILED, tools_for
+from receptionist.clients.errors import ApiError, BadRequest, Conflict, Unavailable
 from receptionist.identity.verify import Candidate
 
 DOB = date(1990, 1, 2)
@@ -346,6 +347,21 @@ async def test_unavailable_maps_to_apology():
     assert (await h.run("list_specializations")).startswith(Unavailable.spoken)
 
 
+async def test_generic_api_error_never_speaks_the_internal_message():
+    h = verified(Harness())
+    h.express.responses["list_appointments"] = ApiError(401, "Invalid or missing API key")
+    text = await h.run("list_my_appointments", scope="upcoming")
+    assert text == API_FAILED
+    assert "API key" not in text
+
+
+async def test_bad_request_message_is_still_spoken():
+    h = verified(Harness())
+    h.express.responses["list_appointments"] = BadRequest(400, "scope must be upcoming or past")
+    text = await h.run("list_my_appointments", scope="upcoming")
+    assert "scope must be upcoming or past" in text
+
+
 async def test_list_appointments_spoken_in_clinic_tz():
     h = verified(Harness())
     text = await h.run("list_my_appointments", scope="upcoming")
@@ -436,6 +452,15 @@ async def test_suggest_specialization_red_flag():
     assert "112" in text
     assert h.ctx.emergency is True
     assert "specializations" not in h.express.names()
+
+
+async def test_suggest_specialization_red_flag_in_hindi_from_the_caller_utterance():
+    h = Harness()
+    # First turn: the tracker is still English, but the caller spoke Hindi.
+    h.ctx.utterance_lang = "hi"
+    text = await h.run("suggest_specialization", symptoms="trouble breathing")
+    assert EMERGENCY_MESSAGE["hi"] in text
+    assert h.ctx.language.current == "hi"
 
 
 async def test_clinic_info():

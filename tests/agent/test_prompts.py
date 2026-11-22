@@ -65,8 +65,21 @@ def test_speak_date():
 def test_turn_context_after_emergency_asks_if_safe_without_locking():
     ctx = make_ctx()
     assert "112" not in turn_context(ctx, NOW)
-    ctx.emergency = True
+    ctx.turn = 3
+    ctx.mark_emergency()
     text = turn_context(ctx, NOW)
     assert "already given" in text
     assert "safe" in text
     assert "continue helping normally" in text
+
+
+def test_turn_context_emergency_note_is_softer_after_one_full_turn():
+    ctx = make_ctx(turn=3)
+    ctx.mark_emergency()
+    ctx.turn = 4  # the agent's first full turn after the message: still ask
+    assert "gently ask whether they are safe" in turn_context(ctx, NOW)
+    ctx.turn = 5
+    text = turn_context(ctx, NOW)
+    assert "gently ask" not in text
+    assert "given earlier in this call" in text
+    assert "112" in text

@@ -1,4 +1,9 @@
-from receptionist.agent.language import FILLER, LanguageTracker, utterance_language
+from receptionist.agent.language import (
+    FILLER,
+    LanguageTracker,
+    emergency_language,
+    utterance_language,
+)
 
 
 def test_devanagari_is_hindi():
@@ -53,3 +58,16 @@ def test_force_switches_immediately():
 
 def test_fillers():
     assert FILLER == {"en": "One moment, let me check.", "hi": "एक सेकंड, मैं देख रही हूँ।"}
+
+
+def test_romanised_hindi_with_postpositions():
+    assert utterance_language("papa ko saans nahi aa rahi", "en-IN") == "hi"
+
+
+def test_emergency_language_follows_the_utterance_and_forces_hindi():
+    t = LanguageTracker()
+    assert emergency_language(t, "मेरे पिताजी को सांस नहीं आ रही", "en-IN") == "hi"
+    assert t.current == "hi"
+    t2 = LanguageTracker()
+    assert emergency_language(t2, "he can't breathe", "en-IN") == "en"
+    assert t2.current == "en"
