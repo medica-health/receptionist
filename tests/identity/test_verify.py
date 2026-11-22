@@ -61,6 +61,22 @@ def test_two_name_matches_same_dob_unverifiable():
     assert r.outcome == Outcome.UNVERIFIABLE
 
 
+def test_wrong_dob_counted_even_with_undated_namesake():
+    n2 = Candidate("n2", "Abhinav Singh", "n2@x", None)
+    v = Verifier([A, n2])
+    r1 = v.attempt("Abhinav Singh", date(1991, 1, 1))
+    assert r1.outcome == Outcome.WRONG_DOB
+    assert v.failures == 1
+    assert v.attempt("Abhinav Singh", date(1991, 1, 2)).outcome == Outcome.LOCKED
+
+
+def test_exact_match_wins_over_undated_namesake():
+    n2 = Candidate("n2", "Abhinav Singh", "n2@x", None)
+    r = Verifier([A, n2]).attempt("Abhinav Singh", date(1990, 3, 5))
+    assert r.outcome == Outcome.VERIFIED
+    assert r.candidate == A
+
+
 def test_empty_candidates_not_found():
     assert Verifier([]).attempt("Abhinav Singh", date(1990, 3, 5)).outcome == Outcome.NOT_FOUND
 
@@ -72,4 +88,12 @@ def test_validate_dob():
     assert validate_dob(date(1990, 3, 5), today)
     assert validate_dob(date(1906, 11, 22), today)
     assert not validate_dob(date(1906, 11, 21), today)
-    assert validate_dob(date(1950, 2, 28), date(2024, 2, 29)) is True
+    # Feb 29 boundary: 1904 is a leap year, so the bound is exactly 1904-02-29
+    assert validate_dob(date(1904, 2, 29), date(2024, 2, 29))
+    assert not validate_dob(date(1904, 2, 28), date(2024, 2, 29))
+    # 1900 is not a leap year: falls back to Feb 28
+    assert validate_dob(date(1900, 2, 28), date(2020, 2, 29))
+    assert not validate_dob(date(1900, 2, 27), date(2020, 2, 29))
+    # non-leap edge
+    assert validate_dob(date(1905, 3, 1), date(2025, 3, 1))
+    assert not validate_dob(date(1905, 2, 28), date(2025, 3, 1))

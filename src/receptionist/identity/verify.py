@@ -48,10 +48,9 @@ class Verifier:
             return VerifyResult(Outcome.VERIFIED, exact[0])
         if len(exact) > 1:
             return VerifyResult(Outcome.UNVERIFIABLE)
-        undated = [c for c in matches if c.dob is None]
-        if undated:
+        if all(c.dob is None for c in matches):
             if len(self._candidates) == 1:
-                return VerifyResult(Outcome.VERIFIED, undated[0], save_dob=True)
+                return VerifyResult(Outcome.VERIFIED, matches[0], save_dob=True)
             return VerifyResult(Outcome.UNVERIFIABLE)
         self.failures += 1
         left = self._max_attempts - self.failures
@@ -64,5 +63,8 @@ def validate_dob(dob: date, today: date) -> bool:
     """Not in the future and age at most 120."""
     if dob > today:
         return False
-    day = 28 if (today.month, today.day) == (2, 29) else today.day
-    return dob >= date(today.year - 120, today.month, day)
+    try:
+        oldest = today.replace(year=today.year - 120)
+    except ValueError:  # today is Feb 29 and the year 120 ago was not a leap year
+        oldest = date(today.year - 120, 2, 28)
+    return dob >= oldest
