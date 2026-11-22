@@ -14,6 +14,7 @@ from receptionist.agent.language import LanguageTracker
 from receptionist.app import AppDeps, create_app
 from receptionist.config import Settings
 from receptionist.session import Speech
+from receptionist.voice.relay_token import mint_relay_token
 
 TOKEN = "test-auth-token"
 BASE = "https://receptionist.test"
@@ -122,13 +123,27 @@ class Harness:
         )
 
 
-def setup_msg(call_sid: str = "CA1", from_: str = "+919876543210") -> dict:
+def setup_msg(
+    call_sid: str = "CA1",
+    from_: str = "+919876543210",
+    *,
+    token_from: str | None = "+919876543210",
+    token_sid: str | None = None,
+    token: str | None = "mint",
+) -> dict:
+    """A setup message carrying a relay token minted (as the webhook does) for `token_sid`
+    (default `call_sid`) and `token_from`. `token=None` leaves it out."""
+    custom = {"callSid": call_sid}
+    if token == "mint":
+        token = mint_relay_token(token_sid or call_sid, token_from, TOKEN)
+    if token is not None:
+        custom["relayToken"] = token
     return {
         "type": "setup",
         "callSid": call_sid,
         "from": from_,
         "to": "+911234567890",
-        "customParameters": {"callSid": call_sid},
+        "customParameters": custom,
     }
 
 

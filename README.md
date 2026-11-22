@@ -35,8 +35,21 @@ Every signature is checked against `PUBLIC_BASE_URL` + path, never the request's
 **Graceful drain.** The first SIGTERM doesn't stop the server: `/twilio/voice` and
 `/api/health` return 503 (so the load balancer stops sending new calls) while live calls carry
 on. The process exits when no call is open (after at least 30 s), or after 13 minutes at most;
-a second SIGTERM or Ctrl+C exits at once. Set the pod's `terminationGracePeriodSeconds` to at
-least 900.
+a second SIGTERM or Ctrl+C exits at once. Deployment requirements for this to work:
+
+- The pod's `terminationGracePeriodSeconds` must be at least 900.
+- The ALB target group's `deregistration_delay.timeout_seconds` must be at least 780 (the
+  default 300 drops live calls 5 minutes into a drain).
+- The readiness probe uses `/api/health`; the **liveness** probe must use `/`, because
+  `/api/health` returns 503 while draining and a failing liveness probe would kill the pod.
+- Set the Twilio number's fallback URL ("Primary handler fails") to the same
+  `<PUBLIC_BASE_URL>/twilio/voice`, so a call that hits a draining pod is retried.
+
+**Relay token.** ConversationRelay's `setup` message is unsigned, so the signed
+`/twilio/voice` response carries a `relayToken` `<Parameter>` (HMAC-SHA256 over
+`callSid|caller|expiry` with `TWILIO_AUTH_TOKEN`, valid 5 minutes). The relay takes the CallSid
+and caller number only from that token; a setup without a valid token, or for another CallSid,
+is closed with 1008.
 
 ### Local phone test
 

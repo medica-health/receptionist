@@ -266,3 +266,69 @@ def test_failing_turn_still_closes_the_talk_cycle_and_keeps_serving():
         assert [f["token"] for f in receive_until_last(ws)] == ["Partial", ""]
         ws.send_json(prompt("again"))
         assert [f["token"] for f in receive_until_last(ws)] == ["Partial", ""]
+
+
+def _rejected_setup(msg: dict) -> Harness:
+    h = Harness(tokens("ok"))
+    with h.connect() as ws:
+        ws.send_json(msg)
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+        assert exc.value.code == 1008
+    assert h.sessions == []
+    assert h.app.state.calls == {}
+    return h
+
+
+def test_forged_from_is_ignored_in_favour_of_the_token():
+    h = Harness(tokens("ok"))
+    with h.connect() as ws:
+        ws.send_json(setup_msg(from_="+911111111111", token_from="+919876543210"))
+        ws.send_json(prompt("hi"))
+        receive_until_last(ws)
+    assert h.session.raw_from == "+919876543210"
+
+
+def test_withheld_caller_token_gives_no_number():
+    h = Harness(tokens("ok"))
+    with h.connect() as ws:
+        ws.send_json(setup_msg(from_="+919876543210", token_from=None))
+        ws.send_json(prompt("hi"))
+        receive_until_last(ws)
+    assert h.session.raw_from is None
+
+
+def test_setup_without_token_closes_1008():
+    _rejected_setup(setup_msg(token=None))
+
+
+def test_setup_with_invalid_token_closes_1008():
+    _rejected_setup(setup_msg(token="bogus.token"))
+
+
+def test_token_for_another_call_sid_closes_1008():
+    _rejected_setup(setup_msg("CA1", token_sid="CA2"))
+
+
+def test_expired_token_closes_1008():
+    from voice_fakes import TOKEN
+
+    from receptionist.voice.relay_token import mint_relay_token
+
+    expired = mint_relay_token("CA1", "+919876543210", TOKEN, now=time.time() - 301)
+    _rejected_setup(setup_msg(token=expired))
+
+
+def test_reused_token_while_call_is_open_closes_1008():
+    h = Harness(tokens("ok"))
+    msg = setup_msg()
+    with h.connect() as first:
+        first.send_json(msg)
+        first.send_json(prompt("hi"))
+        receive_until_last(first)
+        with h.connect() as second:
+            second.send_json(msg)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                second.receive_json()
+            assert exc.value.code == 1008
+    assert len(h.sessions) == 1

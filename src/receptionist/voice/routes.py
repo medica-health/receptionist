@@ -12,6 +12,7 @@ from receptionist.app import envelope
 from receptionist.identity.phone import mask_phone, normalize_phone
 from receptionist.session import CallSession
 from receptionist.voice.relay import RelayConnection, release_pending_hold
+from receptionist.voice.relay_token import mint_relay_token
 from receptionist.voice.twilio_auth import public_url, verify_twilio_signature
 from receptionist.voice.twiml import build_connect_twiml, build_reject_twiml
 
@@ -79,7 +80,11 @@ async def voice(request: Request) -> Response:
         meta = {"from": e164, "started_at": datetime.now(UTC).isoformat()}
         await guards.set_call_meta(call_sid, meta)
     ws_url = public_url(settings, RELAY_PATH, websocket=True)
-    return _xml(build_connect_twiml(ws_url, settings, {"callSid": call_sid}))
+    # The relay socket's setup message is unsigned; this token carries the verified CallSid
+    # and caller number over to it.
+    relay_token = mint_relay_token(call_sid, e164, settings.twilio_auth_token)
+    custom = {"callSid": call_sid, "relayToken": relay_token}
+    return _xml(build_connect_twiml(ws_url, settings, custom))
 
 
 @router.post(STATUS_PATH)
@@ -120,6 +125,7 @@ async def relay(ws: WebSocket) -> None:
         session_factory=state.session_factory,
         registry=state.calls,
         busy=state.busy_calls,
+        token_key=token,
     )
     state.relays.add(connection)
     try:

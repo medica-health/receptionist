@@ -1,9 +1,10 @@
 import xml.etree.ElementTree as ET
 
 from fastapi.testclient import TestClient
-from voice_fakes import BASE, FakeGuards, FakeHold, FakeSession, settings, sign
+from voice_fakes import BASE, TOKEN, FakeGuards, FakeHold, FakeSession, settings, sign
 
 from receptionist.app import AppDeps, create_app
+from receptionist.voice.relay_token import verify_relay_token
 from receptionist.voice.routes import REJECT_EN, REJECT_HI
 
 VOICE_URL = f"{BASE}/twilio/voice"
@@ -57,6 +58,8 @@ def test_valid_signature_returns_connect_twiml():
     assert relay.get("url") == "wss://receptionist.test/twilio/relay"
     params = {p.get("name"): p.get("value") for p in relay.findall("Parameter")}
     assert params["callSid"] == "CA1"
+    claims = verify_relay_token(params["relayToken"], TOKEN, call_sid="CA1")
+    assert claims is not None and claims.caller_e164 == "+919876543210"
     assert guards.registered == ["+919876543210"]
     assert guards.meta["CA1"]["from"] == "+919876543210"
 
@@ -79,6 +82,11 @@ def test_anonymous_caller_still_connects():
     assert ET.fromstring(res.text).find("./Connect/ConversationRelay") is not None
     assert guards.registered == []
     assert guards.meta["CA1"]["from"] is None
+    relay = ET.fromstring(res.text).find("./Connect/ConversationRelay")
+    token = next(
+        p.get("value") for p in relay.findall("Parameter") if p.get("name") == "relayToken"
+    )
+    assert verify_relay_token(token, TOKEN, call_sid="CA1").caller_e164 is None
 
 
 def test_draining_returns_503():

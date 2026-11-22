@@ -20,7 +20,8 @@ from typing import Any
 import anyio
 from starlette.websockets import WebSocket
 
-from receptionist.identity.phone import mask_phone, normalize_phone
+from receptionist.identity.phone import mask_phone
+from receptionist.voice.relay_token import verify_relay_token
 from receptionist.voice.twiml import LANG_CODES
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,7 @@ class RelayConnection:
         session_factory: SessionFactory,
         registry: dict[str, Any],
         busy: set[str],
+        token_key: str,
     ) -> None:
         self.ws = ws
         self.deps = deps
@@ -79,6 +81,7 @@ class RelayConnection:
         self._factory = session_factory
         self._registry = registry
         self._busy = busy
+        self._token_key = token_key
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._closed = False
         self._ended = False
@@ -161,17 +164,28 @@ class RelayConnection:
     async def _on_setup(self, msg: dict[str, Any]) -> None:
         if self.session is not None:
             return
+        # The setup message is unsigned: the CallSid and caller number come only from the
+        # relay token our signed webhook minted (setup's own `from` is ignored).
         custom = msg.get("customParameters")
         custom = custom if isinstance(custom, dict) else {}
-        call_sid = str(msg.get("callSid") or custom.get("callSid") or "")
-        raw_from = msg.get("from") or custom.get("from")
-        if not call_sid:
-            log.warning("relay setup without a callSid; closing")
+        call_sid = msg.get("callSid")
+        token = custom.get("relayToken")
+        claims = (
+            verify_relay_token(token, self._token_key, call_sid=call_sid)
+            if isinstance(token, str) and isinstance(call_sid, str)
+            else None
+        )
+        if claims is None:
+            log.warning("relay setup without a valid relay token; closing")
             await self._close(1008)
             return
-        e164 = normalize_phone(raw_from)
+        if claims.call_sid in self._registry:
+            log.warning("relay token reused call=%s; closing", claims.call_sid)
+            await self._close(1008)
+            return
+        call_sid, e164 = claims.call_sid, claims.caller_e164
         try:
-            session = await self._factory(call_sid, raw_from, self.deps)
+            session = await self._factory(call_sid, e164, self.deps)
         except Exception as exc:
             log.error("call setup failed call=%s: %s", call_sid, type(exc).__name__)
             await self._close(1011)
@@ -240,7 +254,9 @@ class RelayConnection:
                         if text and not self._muted and await self._send_text(text, last=False):
                             spoke = True
                     elif piece.kind == "switch_language":
-                        code = LANG_CODES[piece.lang or self.session.ctx.language.current]
+                        code = LANG_CODES.get(
+                            piece.lang or self.session.ctx.language.current, "en-IN"
+                        )
                         await self._send(
                             {"type": "language", "ttsLanguage": code, "transcriptionLanguage": code}
                         )
@@ -264,7 +280,7 @@ class RelayConnection:
     # ------------------------------------------------------------ outgoing
 
     async def _send_text(self, token: str, *, last: bool) -> bool:
-        lang = LANG_CODES[self.session.ctx.language.current]
+        lang = LANG_CODES.get(self.session.ctx.language.current, "en-IN")
         return await self._send({"type": "text", "token": token, "last": last, "lang": lang})
 
     async def _send(self, payload: dict[str, Any]) -> bool:
