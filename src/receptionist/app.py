@@ -68,7 +68,14 @@ def create_app(deps: AppDeps | None = None) -> FastAPI:
 
     @app.exception_handler(StarletteHTTPException)
     async def http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
-        message = "Route not found" if exc.status_code == 404 else str(exc.detail)
+        if exc.status_code == 404:
+            message = "Route not found"
+        elif exc.status_code == 405:
+            message = "Method not allowed"
+        elif exc.status_code >= 500:
+            message = "Internal server error"
+        else:
+            message = str(exc.detail)
         return _error(exc.status_code, message)
 
     @app.exception_handler(RequestValidationError)

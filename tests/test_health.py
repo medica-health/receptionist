@@ -43,3 +43,26 @@ def test_unknown_route_404_envelope():
     res = make_client().get("/nope")
     assert res.status_code == 404
     assert res.json()["success"] is False
+
+
+def test_method_not_allowed_envelope():
+    res = make_client().post("/")
+    body = res.json()
+    assert res.status_code == 405
+    assert body["success"] is False
+    assert body["message"] == "Method not allowed"
+
+
+def test_unhandled_exception_returns_generic_500_envelope():
+    app = create_app()
+
+    @app.get("/boom")
+    async def boom():
+        raise RuntimeError("secret internal detail")
+
+    res = TestClient(app, raise_server_exceptions=False).get("/boom")
+    assert res.status_code == 500
+    body = res.json()
+    assert body["success"] is False
+    assert body["message"] == "Internal server error"
+    assert "secret internal detail" not in res.text
