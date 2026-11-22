@@ -60,3 +60,13 @@ def test_speak_time_in_clinic_tz():
 def test_speak_date():
     assert speak_date(date(2026, 11, 24), "en") == "Tuesday, 24 November 2026"
     assert speak_date(date(2026, 11, 24), "hi") == "मंगलवार, 24 नवंबर 2026"
+
+
+def test_turn_context_after_emergency_asks_if_safe_without_locking():
+    ctx = make_ctx()
+    assert "112" not in turn_context(ctx, NOW)
+    ctx.emergency = True
+    text = turn_context(ctx, NOW)
+    assert "already given" in text
+    assert "safe" in text
+    assert "continue helping normally" in text

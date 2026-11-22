@@ -104,7 +104,9 @@ def turn_context(ctx: CallContext, now: datetime, tz: str | None = None) -> str:
         )
     if ctx.emergency:
         lines.append(
-            "An emergency was flagged on this call. Stay calm and minimal and repeat the advice "
-            "to call 112."
+            "The emergency message (hang up and call 112) was already given on this call. "
+            "Before anything else, gently ask whether they are safe right now. If it is an "
+            "emergency, repeat the advice to call 112 and keep it short. If it isn't (for "
+            "example they were talking about the past), continue helping normally."
         )
     return "\n".join(lines)

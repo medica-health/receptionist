@@ -1,12 +1,19 @@
 """In-memory fakes for the agent tests. They record every call they receive."""
 
+import json
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 from typing import Any
 
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from pydantic import Field as PydField
+
 from receptionist.agent.context import CallContext
 from receptionist.agent.language import LanguageTracker
 from receptionist.agent.tools import ToolDeps, build_tools
+from receptionist.app import AppDeps
 from receptionist.config import Settings
 from receptionist.identity.verify import Candidate, Verifier
 
@@ -225,10 +232,17 @@ class FakeGuards:
 
 
 class FakeDirectory:
-    def __init__(self, candidates: list[Candidate] | None = None) -> None:
+    def __init__(
+        self, candidates: list[Candidate] | None = None, error: Exception | None = None
+    ) -> None:
         self.candidates = candidates or []
+        self.error = error
+        self.lookups: list[str] = []
 
     async def find_by_phone(self, e164: str) -> list[Candidate]:
+        self.lookups.append(e164)
+        if self.error is not None:
+            raise self.error
         return list(self.candidates)
 
 
@@ -286,3 +300,101 @@ class Harness:
         assert isinstance(result, str)
         assert len(result) <= 400, result
         return result
+
+
+# ---------------------------------------------------------------- chat model
+
+
+class ScriptedChatModel(BaseChatModel):
+    """Returns queued AIMessages in order and records what it was sent.
+
+    Streams like ChatAnthropic: text in word chunks, tool calls as tool_call_chunks, list
+    content (thinking + text) as one chunk, response_metadata on the last chunk. An entry may
+    be an Exception, which is raised instead.
+    """
+
+    script: list[Any] = PydField(default_factory=list)
+    calls: list[list[BaseMessage]] = PydField(default_factory=list)
+    bound: list[list[str]] = PydField(default_factory=list)
+    bind_kwargs: list[dict] = PydField(default_factory=list)
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted"
+
+    def bind_tools(self, tools, **kwargs):  # type: ignore[override]
+        self.bound.append([t.name for t in tools])
+        self.bind_kwargs.append(kwargs)
+        return self
+
+    def _next(self, messages: list[BaseMessage]) -> AIMessage:
+        self.calls.append(list(messages))
+        if not self.script:
+            raise AssertionError("ScriptedChatModel ran out of responses")
+        item = self.script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=self._next(messages))])
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        msg = self._next(messages)
+        chunks: list[AIMessageChunk] = []
+        if isinstance(msg.content, list):
+            chunks.append(AIMessageChunk(content=msg.content))
+        elif msg.content:
+            words = msg.content.split(" ")
+            chunks += [
+                AIMessageChunk(content=w if i == 0 else " " + w) for i, w in enumerate(words)
+            ]
+        for i, tc in enumerate(msg.tool_calls):
+            chunks.append(
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {
+                            "name": tc["name"],
+                            "args": json.dumps(tc["args"]),
+                            "id": tc.get("id") or f"call_{i}",
+                            "index": i,
+                        }
+                    ],
+                )
+            )
+        if not chunks:
+            chunks.append(AIMessageChunk(content=""))
+        chunks[-1].response_metadata = dict(msg.response_metadata)
+        for chunk in chunks:
+            gen = ChatGenerationChunk(message=chunk)
+            if run_manager:
+                await run_manager.on_llm_new_token(gen.text, chunk=gen)
+            yield gen
+
+
+def say(text: str) -> AIMessage:
+    return AIMessage(content=text)
+
+
+def call(name: str, call_id: str | None = None, **args: Any) -> AIMessage:
+    return AIMessage(
+        content="", tool_calls=[{"name": name, "args": args, "id": call_id or f"id_{name}"}]
+    )
+
+
+def make_app_deps(
+    candidates: list[Candidate] | None = None,
+    script: list[Any] | None = None,
+    guards: FakeGuards | None = None,
+    directory: Any = None,
+) -> AppDeps:
+    model = ScriptedChatModel(script=list(script or []))
+    return AppDeps(
+        settings=Settings(),
+        directory=directory or FakeDirectory(candidates),
+        guards=guards or FakeGuards(),
+        express=FakeExpress(),
+        spring=FakeSpring(),
+        llm_factory=lambda: model,
+    )
