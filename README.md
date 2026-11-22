@@ -19,7 +19,8 @@ uv run receptionist serve   # http://localhost:7000
 
 `GET /` returns `{"message":"Running"}`. `GET /api/health` returns the standard envelope
 `{success, message, data, timestamp}` with `data.dependencies` (postgres, redis, express, spring)
-each `up`, `down` or `disabled`.
+each `up`, `down` or `disabled`. `GET /ready` is the cheap readiness check for Kubernetes and
+the ALB: it calls no dependency and returns 200, or 503 while draining.
 
 ## Voice (Twilio ConversationRelay)
 
@@ -32,7 +33,7 @@ each `up`, `down` or `disabled`.
 Every signature is checked against `PUBLIC_BASE_URL` + path, never the request's Host, so
 `PUBLIC_BASE_URL` must be exactly the origin configured in Twilio.
 
-**Graceful drain.** The first SIGTERM doesn't stop the server: `/twilio/voice` and
+**Graceful drain.** The first SIGTERM doesn't stop the server: `/twilio/voice`, `/ready` and
 `/api/health` return 503 (so the load balancer stops sending new calls) while live calls carry
 on. The process exits when no call is open (after at least 30 s), or after 13 minutes at most;
 a second SIGTERM or Ctrl+C exits at once. Deployment requirements for this to work:
@@ -40,8 +41,10 @@ a second SIGTERM or Ctrl+C exits at once. Deployment requirements for this to wo
 - The pod's `terminationGracePeriodSeconds` must be at least 900.
 - The ALB target group's `deregistration_delay.timeout_seconds` must be at least 780 (the
   default 300 drops live calls 5 minutes into a drain).
-- The readiness probe uses `/api/health`; the **liveness** probe must use `/`, because
-  `/api/health` returns 503 while draining and a failing liveness probe would kill the pod.
+- The readiness probe and the ALB health check use `/ready` (not `/api/health`, which waits on
+  each dependency and would fail readiness on every replica when one is slow); the **liveness**
+  probe must use `/`, because `/ready` returns 503 while draining and a failing liveness probe
+  would kill the pod.
 - Set the Twilio number's fallback URL ("Primary handler fails") to the same
   `<PUBLIC_BASE_URL>/twilio/voice`, so a call that hits a draining pod is retried.
 

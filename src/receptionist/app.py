@@ -78,6 +78,14 @@ def create_app(deps: AppDeps | None = None) -> FastAPI:
     async def root() -> dict[str, str]:
         return {"message": "Running"}
 
+    @app.get("/ready", response_model=None)
+    async def ready() -> dict[str, Any] | JSONResponse:
+        """Readiness for Kubernetes and the ALB. Deliberately calls no dependency: a slow
+        dependency must not fail readiness on every replica and empty the Service."""
+        if app.state.draining:
+            return _error(503, "Draining", {"draining": True})
+        return ok("Ready")
+
     @app.get("/api/health", response_model=None)
     async def api_health() -> dict[str, Any] | JSONResponse:
         if app.state.draining:

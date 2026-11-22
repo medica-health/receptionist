@@ -59,7 +59,10 @@ class Guards:
         key = f"rcpt:verify-fail:{e164}"
         try:
             count = await self._r.incr(key)
-            await self._r.expire(key, _FAIL_TTL, nx=True)
+            # The failure that locks the number restarts the 24 h window, so a lock lasts
+            # 24 h from the locking failure, not from the first one.
+            locking = count == self._settings.verify_max_failures_per_day
+            await self._r.expire(key, _FAIL_TTL, nx=not locking)
         except Exception as exc:
             self._warn(e164, type(exc).__name__)
             return 0

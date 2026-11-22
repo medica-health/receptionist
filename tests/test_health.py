@@ -83,3 +83,25 @@ def test_lifespan_shutdown_sets_draining():
     with TestClient(app):
         assert app.state.draining is False
     assert app.state.draining is True
+
+
+def test_ready_ok_without_calling_dependencies():
+    class Exploding:
+        async def status(self) -> dict:
+            raise AssertionError("/ready must not probe dependencies")
+
+    res = TestClient(create_app(AppDeps(health=Exploding()))).get("/ready")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    assert body["message"] == "Ready"
+
+
+def test_ready_503_while_draining():
+    client = make_client()
+    client.app.state.draining = True
+    res = client.get("/ready")
+    assert res.status_code == 503
+    assert res.json()["data"]["draining"] is True
+    # The root (liveness) stays 200 while draining, so live calls aren't killed.
+    assert client.get("/").status_code == 200

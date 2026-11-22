@@ -1,10 +1,10 @@
 """Graceful drain on SIGTERM, so a rolling deploy doesn't hang up on live calls.
 
 Plain uvicorn closes every WebSocket (code 1012) as soon as it starts shutting down. Instead,
-the first SIGTERM only marks the app draining: `/twilio/voice` and `/api/health` return 503,
-so the load balancer stops sending new calls, while open relay sockets carry on. The server
-exits once no call is left (after at least `min_seconds`, giving the load balancer time to
-see the 503s), or after `max_seconds` at most. A second SIGTERM, or SIGINT, exits now.
+the first SIGTERM only marks the app draining: `/twilio/voice`, `/ready` and `/api/health`
+return 503, so the load balancer stops sending new calls, while open relay sockets carry on.
+The server exits once no call is left (after at least `min_seconds`, giving the load balancer
+time to see the 503s), or after `max_seconds` at most. A second SIGTERM, or SIGINT, exits now.
 The pod's terminationGracePeriodSeconds must exceed `max_seconds` plus uvicorn's
 `timeout_graceful_shutdown`.
 """

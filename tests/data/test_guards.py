@@ -72,3 +72,28 @@ async def test_fail_open_on_error(settings, caplog):
         assert await guards.ping() is False
     assert len(caplog.records) == 1
     assert NUMBER not in caplog.text
+
+
+async def test_lock_lasts_24h_from_the_locking_failure(client, settings):
+    guards = Guards(client, settings)
+    key = f"rcpt:verify-fail:{NUMBER}"
+    for _ in range(4):
+        await guards.record_failure(NUMBER)
+    # Pretend the first failure was ~23 h ago: only an hour of the window is left.
+    await client.expire(key, 3600)
+    assert await guards.record_failure(NUMBER) == 5
+    assert await guards.is_locked(NUMBER) is True
+    assert await client.ttl(key) > 86400 - 5
+    # Later failures don't extend it again.
+    await client.expire(key, 100)
+    await guards.record_failure(NUMBER)
+    assert 0 < await client.ttl(key) <= 100
+
+
+async def test_failures_below_the_threshold_keep_the_first_failure_window(client, settings):
+    guards = Guards(client, settings)
+    key = f"rcpt:verify-fail:{NUMBER}"
+    await guards.record_failure(NUMBER)
+    await client.expire(key, 3600)
+    await guards.record_failure(NUMBER)
+    assert 0 < await client.ttl(key) <= 3600
