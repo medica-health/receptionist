@@ -24,9 +24,10 @@ class PatientDirectory:
     async def close(self) -> None:
         await self._pool.close()
 
-    async def ping(self) -> bool:
+    async def ping(self, timeout: float = 2.5) -> bool:
+        """SELECT 1, waiting at most `timeout` seconds for a pooled connection."""
         try:
-            async with self._pool.connection() as conn:
+            async with self._pool.connection(timeout=timeout) as conn:
                 await conn.execute("SELECT 1")
             return True
         except Exception:

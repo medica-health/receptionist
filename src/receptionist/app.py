@@ -1,6 +1,8 @@
 """FastAPI app factory and the response envelope shared with the sibling APIs."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +29,8 @@ class AppDeps:
     spring: Any = None  # Spring client (Task 5)
     llm_factory: Any = None  # Callable[[], BaseChatModel] (Task 9)
     health: Any = None  # HealthChecker or anything with async status()
+    startup: Any = None  # async () -> None, run when the app starts (build_deps sets it)
+    shutdown: Any = None  # async () -> None, run when the app stops
 
 
 def envelope(success: bool, message: str, data: Any = None) -> dict[str, Any]:
@@ -51,7 +55,17 @@ def create_app(deps: AppDeps | None = None) -> FastAPI:
     settings: Settings = deps.settings or get_settings()
     health = deps.health or HealthChecker()
 
-    app = FastAPI(title="MediCare receptionist")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        if deps.startup is not None:
+            await deps.startup()
+        try:
+            yield
+        finally:
+            if deps.shutdown is not None:
+                await deps.shutdown()
+
+    app = FastAPI(title="MediCare receptionist", lifespan=lifespan)
     app.state.deps = deps
     app.state.settings = settings
 

@@ -21,6 +21,15 @@ uv run receptionist serve   # http://localhost:7000
 `{success, message, data, timestamp}` with `data.dependencies` (postgres, redis, express, spring)
 each `up`, `down` or `disabled`.
 
+Text-mode call against the real stack (Postgres, Redis, both APIs, a real `ANTHROPIC_API_KEY`):
+
+```bash
+uv run receptionist chat --from +919876543210 [--call-sid cli-<uuid>]
+```
+
+Each stdin line is one caller utterance. Fillers print in brackets, language switches as
+`[switch → hi]` and the end of the call as `[end]`.
+
 ## Test
 
 ```bash
@@ -62,3 +71,7 @@ Missing required variables make startup fail (outside `APP_ENV=test`).
 | `CALLS_PER_HOUR_PER_NUMBER` | `10` | |
 | `TTS_PROVIDER`, `TTS_VOICE_EN`, `TTS_VOICE_HI` | `ElevenLabs`, unset | ConversationRelay voice |
 | `STT_PROVIDER`, `STT_MODEL` | `Deepgram`, `nova-3` | ConversationRelay speech-to-text |
+
+**Keep LangSmith tracing off.** Don't set `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`: traces
+would record tool arguments (dates of birth) and tool results (prescriptions). Logs never
+contain transcripts, dates of birth or prescription text, and phone numbers are masked.
