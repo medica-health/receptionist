@@ -1,0 +1,50 @@
+[project]
+name = "receptionist"
+version = "0.1.0"
+description = "Twilio voice receptionist for the MediCare appointment system"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "langgraph",
+    "langchain-anthropic",
+    "twilio",
+    "psycopg[binary,pool]",
+    "redis",
+    "httpx",
+    "pyjwt",
+    "pydantic-settings",
+    "rapidfuzz",
+]
+
+[project.scripts]
+receptionist = "receptionist.cli:main"
+
+[dependency-groups]
+dev = [
+    "fakeredis>=2.40.0",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/receptionist"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+filterwarnings = ["ignore:.*asyncio.iscoroutinefunction.*:DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
