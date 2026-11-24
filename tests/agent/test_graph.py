@@ -169,8 +169,8 @@ async def test_verify_then_list_appointments():
     assert s.ctx.verified == ABHINAV
     out2 = await turn(s, "what are my upcoming appointments")
     assert spoken(out2) == "You have one appointment with Dr. Meera Rao."
-    express = s.deps.express
-    assert express.names() == ["as_patient", "list_appointments"]
+    backend = s.deps.backend
+    assert backend.names() == ["as_patient", "list_appointments"]
     # Patient tools are bound only after verification; identity tools disappear.
     bound = model(s).bound
     assert "list_my_appointments" not in bound[0]
@@ -223,14 +223,14 @@ async def test_book_across_two_turns():
     )
     s.ctx.verified = ABHINAV
     await turn(s, "book Dr Rao on Tuesday at 10")
-    express = s.deps.express
-    assert "hold" in express.names()
-    assert "book" not in express.names()
+    backend = s.deps.backend
+    assert "hold" in backend.names()
+    assert "book" not in backend.names()
     assert s.ctx.pending_hold is not None
     out = await turn(s, "haan, book kar do")
     assert spoken(out) == "Booked."
-    assert express.names().count("book") == 1
-    args, _ = express.last("book")
+    assert backend.names().count("book") == 1
+    args, _ = backend.last("book")
     assert args[:2] == ("d1", "c1")
     assert args[2].isoformat() == "2026-11-24T10:00:00+05:30"
     assert s.ctx.pending_hold is None
@@ -401,7 +401,7 @@ async def test_interrupt_during_a_write_stops_it_and_marks_outcome_unknown():
         ],
     )
     s.ctx.verified = ABHINAV
-    s.deps.express.responses["book"] = slow_book
+    s.deps.backend.responses["book"] = slow_book
     await turn(s, "book Dr Rao on Tuesday at 10")
 
     stream = s.respond("yes please")
@@ -416,7 +416,7 @@ async def test_interrupt_during_a_write_stops_it_and_marks_outcome_unknown():
     # Teardown finished before respond returned: the write was cancelled, nothing lingers.
     assert cancelled.is_set()
     assert asyncio.all_tasks() == {asyncio.current_task()}
-    # The write may have reached express-api: it must not be retried blindly.
+    # The write may have reached the database: it must not be retried blindly.
     assert s.ctx.pending_hold is not None and s.ctx.pending_hold.outcome_unknown
 
     out = await turn(s, "hello?")

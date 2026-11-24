@@ -13,9 +13,9 @@ dependencies = [
     "psycopg[binary,pool]",
     "redis",
     "httpx",
-    "pyjwt",
     "pydantic-settings",
     "rapidfuzz",
+    "bcrypt>=5.0.0",
 ]
 
 [project.scripts]
@@ -24,6 +24,7 @@ receptionist = "receptionist.cli:main"
 [dependency-groups]
 dev = [
     "fakeredis>=2.40.0",
+    "lupa>=2.8",
     "pytest",
     "pytest-asyncio",
     "ruff",
@@ -48,3 +49,8 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# SQL and Lua kept line-for-line with express-api's copies.
+"src/receptionist/backend/holds.py" = ["E501"]
+"src/receptionist/backend/store.py" = ["E501"]

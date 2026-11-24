@@ -118,8 +118,7 @@ class CallSession:
         tool_deps = ToolDeps(
             directory=deps.directory,
             guards=deps.guards,
-            express=deps.express,
-            spring=deps.spring,
+            backend=deps.backend,
             settings=settings,
         )
         if clock is not None:

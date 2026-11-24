@@ -2,7 +2,26 @@
 
 Twilio voice receptionist for the MediCare appointment system. A Python service (FastAPI,
 LangGraph, Twilio ConversationRelay) that answers calls, verifies the caller against
-spring-api's `auth.users`, and books/changes appointments through express-api.
+`auth.users`, and books/changes appointments.
+
+**Standalone.** The receptionist doesn't call express-api or spring-api. It works directly on
+the Postgres database and Redis those APIs share (`src/receptionist/backend/`):
+
+- Doctors, clinics, slots, bookings, cancellations, reschedules and prescriptions use the same
+  SQL and rules as express-api (`backend/store.py`, `backend/policies.py`). Bookings are still
+  guarded by the `EXCLUDE` constraints on `app.appointments`.
+- Slot holds and the free-slot cache use express-api's Redis keys and Lua scripts
+  (`backend/holds.py`), so a hold taken on a call blocks a web booking and the reverse. Every
+  write that changes a doctor's free slots bumps the same cache version.
+- New phone callers are inserted into `auth.users` the way spring-api's PhonePatientService
+  did (placeholder `p-<24 hex>@phone.medicare.invalid`, random BCrypt password).
+- Confirmations go out directly: SMS through Twilio for phone patients, email through Resend
+  for everyone else and for the doctor, each recorded in `app.notifications_log`
+  (`backend/notify.py`). Unset credentials mean the message is only logged (`SKIPPED`).
+- Not ported: express-api's MongoDB audit log. Calls are logged (masked) by this service only.
+
+The ported code is a second copy of those rules. **Change both** when booking rules, the
+`auth.users`/`app.*` columns, the hold key format or the notification wording change.
 
 Design: `docs/superpowers/specs/2026-11-22-voice-receptionist-design.md`.
 
@@ -18,7 +37,7 @@ uv run receptionist serve   # http://localhost:7000
 ```
 
 `GET /` returns `{"message":"Running"}`. `GET /api/health` returns the standard envelope
-`{success, message, data, timestamp}` with `data.dependencies` (postgres, redis, express, spring)
+`{success, message, data, timestamp}` with `data.dependencies` (postgres, redis)
 each `up`, `down` or `disabled`. `GET /ready` is the cheap readiness check for Kubernetes and
 the ALB: it calls no dependency and returns 200, or 503 while draining.
 
@@ -56,8 +75,8 @@ is closed with 1008.
 
 ### Local phone test
 
-Needs a Twilio number with ConversationRelay enabled (Console → Voice → Settings), the stack
-running (Postgres, Redis, express-api, spring-api), a real `ANTHROPIC_API_KEY`, and ElevenLabs
+Needs a Twilio number with ConversationRelay enabled (Console → Voice → Settings), Postgres (with the
+spring-api and express-api schemas migrated) and Redis running, a real `ANTHROPIC_API_KEY`, and ElevenLabs
 voice ids for `TTS_VOICE_EN` / `TTS_VOICE_HI` (`<voice id>-v4`; pick a Hindi-capable voice for
 `TTS_VOICE_HI`).
 
@@ -79,7 +98,7 @@ voice ids for `TTS_VOICE_EN` / `TTS_VOICE_HI` (`<voice id>-v4`; pick a Hindi-cap
 6. A 403 in the logs ("without a valid Twilio signature") means `PUBLIC_BASE_URL` doesn't match
    the URL configured in Twilio, or the auth token is wrong.
 
-Text-mode call against the real stack (Postgres, Redis, both APIs, a real `ANTHROPIC_API_KEY`):
+Text-mode call against the real database and Redis (and a real `ANTHROPIC_API_KEY`):
 
 ```bash
 uv run receptionist chat --from +919876543210 [--call-sid cli-<uuid>]
@@ -97,6 +116,17 @@ uv run ruff check .
 
 Tests set `APP_ENV=test`, which relaxes the required-secret checks.
 
+`tests/data/test_backend_pg.py` runs the backend against a real Postgres when
+`TEST_DATABASE_URL` points at a **disposable** database that has spring-api's
+`V1__auth_schema.sql` and express-api's migrations applied (it seeds and leaves its own rows):
+
+```bash
+docker exec cdac-postgres-1 psql -U postgres -c "CREATE DATABASE receptionist_test"
+docker exec -i cdac-postgres-1 psql -U postgres -d receptionist_test   < ../spring-api/src/main/resources/db/migration/V1__auth_schema.sql
+(cd ../express-api && DATABASE_URL=postgres://postgres:postgres@localhost:5432/receptionist_test   JWT_SECRET=$(printf 'x%.0s' {1..40}) bun run migrate)
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/receptionist_test uv run pytest tests/data
+```
+
 ## Docker
 
 ```bash
@@ -113,14 +143,15 @@ Missing required variables make startup fail (outside `APP_ENV=test`).
 | `PORT` | `7000` | |
 | `APP_ENV` | `development` | `test` relaxes required secrets |
 | `PUBLIC_BASE_URL` | required | https origin Twilio reaches |
-| `DATABASE_URL` | required | read-only Postgres role |
-| `REDIS_URL` | required | |
-| `EXPRESS_API_URL`, `SPRING_API_URL` | required | |
-| `API_KEY` | required | |
-| `JWT_SECRET` | required | at least 32 chars, same as the APIs |
-| `JWT_ISSUER`, `JWT_AUDIENCE` | `cdac-auth`, `cdac-api` | |
-| `TWILIO_ACCOUNT_SID` | optional | |
+| `DATABASE_URL` | required | the `receptionist_rw` role on AWS (grants in express-api migration `005`) |
+| `REDIS_URL` | required | the same single-node Redis as express-api (≥ 7) |
+| `SLOT_HOLD_TTL_SECONDS`, `SLOT_CACHE_TTL_SECONDS` | `300`, `60` | keep equal to express-api's |
+| `TWILIO_ACCOUNT_SID` | optional | also needed to send SMS |
 | `TWILIO_AUTH_TOKEN` | required | |
+| `TWILIO_SMS_FROM` or `TWILIO_MESSAGING_SERVICE_SID` | unset | SMS sender; unset means SMS is only logged |
+| `RESEND_API_KEY` | unset | unset means email is only logged |
+| `MAIL_FROM`, `MAIL_REPLY_TO` | `MediCare <onboarding@resend.dev>`, unset | `MAIL_FROM` on a Resend-verified domain |
+| `APP_BASE_URL` | `http://localhost:3000` | links in emails |
 | `ANTHROPIC_API_KEY` | required | |
 | `LLM_MODEL` | `claude-opus-5-5` | |
 | `DEFAULT_TIMEZONE` | `Asia/Kolkata` | |

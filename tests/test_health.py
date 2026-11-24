@@ -14,7 +14,7 @@ class FakeChecker:
 
 
 def make_client() -> TestClient:
-    checker = FakeChecker({"postgres": "up", "redis": "down", "express": "up", "spring": "up"})
+    checker = FakeChecker({"postgres": "up", "redis": "down"})
     return TestClient(create_app(AppDeps(health=checker)))
 
 

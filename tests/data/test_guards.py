@@ -9,7 +9,7 @@ NUMBER = "+919876543210"
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(public_base_url="https://x.test", jwt_secret="x" * 32)
+    return Settings(public_base_url="https://x.test")
 
 
 @pytest.fixture

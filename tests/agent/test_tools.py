@@ -6,7 +6,7 @@ from fakes import APPOINTMENT, Harness, make_ctx, make_deps
 from receptionist.agent.context import PendingCancel, PendingHold, PendingRegistration
 from receptionist.agent.safety import EMERGENCY_MESSAGE
 from receptionist.agent.tools import API_FAILED, tools_for
-from receptionist.clients.errors import ApiError, BadRequest, Conflict, Unavailable
+from receptionist.backend.errors import BackendError, BadRequest, Conflict, Unavailable
 from receptionist.identity.verify import Candidate
 
 DOB = date(1990, 1, 2)
@@ -58,12 +58,12 @@ def test_every_non_general_tool_has_sample_args():
 @pytest.mark.parametrize("name", sorted(PATIENT_TOOL_ARGS))
 async def test_patient_tools_refuse_before_verify(name):
     h = Harness(make_ctx(candidates=[ABHINAV], turn=5))
-    # Even with pending state planted, nothing reaches express-api before verification.
+    # Even with pending state planted, nothing reaches the backend before verification.
     h.ctx.pending_hold = PendingHold("d1", "c1", SLOT, "h1", "s", 1)
     h.ctx.pending_cancel = PendingCancel("a1", "s", 1)
     text = await h.run(name, **PATIENT_TOOL_ARGS[name])
     assert "verif" in text.lower()
-    assert h.express.calls == []
+    assert h.backend.calls == []
 
 
 def test_tools_for_hides_patient_tools_until_verified():
@@ -107,9 +107,9 @@ async def test_verify_save_dob_calls_update_profile():
     h = Harness(make_ctx(candidates=[NO_DOB]))
     await h.run("verify_identity", full_name="Priya Sharma", dob="1985-06-15")
     assert h.ctx.verified == NO_DOB
-    args, _ = h.express.last("update_profile")
+    args, _ = h.backend.last("update_profile")
     assert args == (date(1985, 6, 15),)
-    assert ("as_patient", ("u2", "p@x.y", "Priya Sharma"), {}) in h.express.calls
+    assert ("as_patient", ("u2", "p@x.y", "Priya Sharma"), {}) in h.backend.calls
 
 
 async def test_wrong_dob_records_failure_in_guards():
@@ -167,16 +167,16 @@ async def test_register_only_when_not_found():
     assert "verify_identity" in text and h.ctx.pending_registration is None
     h.ctx.turn = 2
     assert "verify_identity" in await h.run("register_patient")
-    assert h.spring.calls == []
+    assert "create_phone_patient" not in h.backend.names()
     await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
     text = await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
     assert "Rohan Gupta" in text and "4 March 1995" in text
     h.ctx.turn = 3
     text = await h.run("register_patient")
-    args, kwargs = h.spring.last("create_phone_patient")
+    args, kwargs = h.backend.last("create_phone_patient")
     assert args == ("Rohan Gupta", "+919876543210")
     assert kwargs == {"idempotency_key": "CA123"}
-    assert h.express.last("update_profile")[0] == (date(1995, 3, 4),)
+    assert h.backend.last("update_profile")[0] == (date(1995, 3, 4),)
     assert h.ctx.verified is not None and h.ctx.verified.id == "new1"
     assert h.ctx.registered_this_call is True
     assert h.ctx.pending_registration is None
@@ -189,10 +189,10 @@ async def test_register_requires_new_turn():
     await h.run("prepare_registration", full_name="Rohan Gupta", dob="1995-03-04")
     text = await h.run("register_patient")
     assert "confirm first" in text.lower()
-    assert h.spring.calls == [] and h.ctx.verified is None
+    assert "create_phone_patient" not in h.backend.names() and h.ctx.verified is None
     h.ctx.turn = 5
     await h.run("register_patient")
-    assert h.spring.names() == ["create_phone_patient"]
+    assert h.backend.names().count("create_phone_patient") == 1
 
 
 async def test_prepare_registration_refuses_existing_name_and_bad_dob():
@@ -211,7 +211,7 @@ async def test_register_refused_without_caller_id():
     assert "caller id" in text.lower()
     h.ctx.turn = 2
     assert "caller id" in (await h.run("register_patient")).lower()
-    assert h.spring.calls == []
+    assert "create_phone_patient" not in h.backend.names()
 
 
 # ---------------------------------------------------------------- booking
@@ -225,10 +225,10 @@ async def test_book_requires_new_turn():
     assert hold is not None and hold.turn == 3 and hold.hold_id == "h1"
     text = await h.run("book_appointment")
     assert "confirm first" in text.lower()
-    assert "book" not in h.express.names()
+    assert "book" not in h.backend.names()
     h.ctx.turn = 4
     text = await h.run("book_appointment", reason="chest checkup")
-    args, _ = h.express.last("book")
+    args, _ = h.backend.last("book")
     assert args == ("d1", "c1", SLOT, "chest checkup")
     assert h.ctx.pending_hold is None
     assert "booked" in text.lower()
@@ -238,7 +238,7 @@ async def test_book_conflict_clears_hold():
     h = verified(Harness(make_ctx(turn=3)))
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     h.ctx.turn = 4
-    h.express.responses["book"] = Conflict(409, "Slot taken")
+    h.backend.responses["book"] = Conflict(409, "Slot taken")
     text = await h.run("book_appointment")
     assert "just taken" in text
     assert h.ctx.pending_hold is None
@@ -248,16 +248,16 @@ async def test_book_unavailable_is_unknown_outcome_and_no_retry():
     h = verified(Harness(make_ctx(turn=3)))
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     h.ctx.turn = 4
-    h.express.responses["book"] = Unavailable(503, "down")
+    h.backend.responses["book"] = Unavailable(503, "down")
     text = await h.run("book_appointment")
-    assert h.express.names().count("book") == 1
+    assert h.backend.names().count("book") == 1
     assert "list_my_appointments" in text
     assert h.ctx.pending_hold is not None
 
 
 async def test_hold_conflict_says_taken():
     h = verified(Harness(make_ctx(turn=1)))
-    h.express.responses["hold"] = Conflict(409, "Another patient is holding this slot.")
+    h.backend.responses["hold"] = Conflict(409, "Another patient is holding this slot.")
     text = await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     assert "just taken" in text
     assert h.ctx.pending_hold is None
@@ -265,13 +265,13 @@ async def test_hold_conflict_says_taken():
 
 async def test_hold_503_continues_without_hold_id():
     h = verified(Harness(make_ctx(turn=1)))
-    h.express.responses["hold"] = Unavailable(503, "Slot holds are unavailable")
+    h.backend.responses["hold"] = Unavailable(503, "Slot holds are unavailable")
     text = await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     assert h.ctx.pending_hold is not None and h.ctx.pending_hold.hold_id is None
     assert "Dr. Meera Rao" in text
     h.ctx.turn = 2
     await h.run("book_appointment")
-    assert "book" in h.express.names()
+    assert "book" in h.backend.names()
 
 
 async def test_new_hold_releases_previous():
@@ -279,7 +279,7 @@ async def test_new_hold_releases_previous():
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     later = SLOT + timedelta(minutes=30)
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=later.isoformat())
-    assert h.express.last("release_hold")[0] == ("h1",)
+    assert h.backend.last("release_hold")[0] == ("h1",)
     assert h.ctx.pending_hold is not None and h.ctx.pending_hold.start_at == later
 
 
@@ -289,15 +289,15 @@ async def test_new_hold_releases_previous():
 async def test_cancel_two_phase():
     h = verified(Harness(make_ctx(turn=5)))
     text = await h.run("cancel_appointment")
-    assert "prepare_cancel" in text and "cancel" not in h.express.names()
+    assert "prepare_cancel" in text and "cancel" not in h.backend.names()
     text = await h.run("prepare_cancel", appointment_id="a1")
     assert "Dr. Meera Rao" in text and "11:00 AM" in text
     assert h.ctx.pending_cancel == PendingCancel("a1", h.ctx.pending_cancel.summary, 5)
     text = await h.run("cancel_appointment", reason="feeling better")
-    assert "confirm first" in text.lower() and "cancel" not in h.express.names()
+    assert "confirm first" in text.lower() and "cancel" not in h.backend.names()
     h.ctx.turn = 6
     text = await h.run("cancel_appointment", reason="feeling better")
-    assert h.express.last("cancel")[0] == ("a1", "feeling better")
+    assert h.backend.last("cancel")[0] == ("a1", "feeling better")
     assert h.ctx.pending_cancel is None
     assert "cancelled" in text.lower()
 
@@ -313,7 +313,7 @@ async def test_cancel_cutoff_message():
     h = verified(Harness(make_ctx(turn=5)))
     await h.run("prepare_cancel", appointment_id="a1")
     h.ctx.turn = 6
-    h.express.responses["cancel"] = BadRequest(
+    h.backend.responses["cancel"] = BadRequest(
         400, "Appointments can only be changed up to 2 hours before they start"
     )
     text = await h.run("cancel_appointment")
@@ -326,7 +326,7 @@ async def test_reschedule_holds_then_confirms_next_turn():
     text = await h.run("reschedule_appointment", appointment_id="a1", start_at=SLOT.isoformat())
     hold = h.ctx.pending_hold
     assert hold is not None and hold.appointment_id == "a1" and hold.clinic_id == "c1"
-    assert h.express.last("hold")[0] == ("d1", "c1", SLOT)
+    assert h.backend.last("hold")[0] == ("d1", "c1", SLOT)
     assert "10:00 AM" in text
     assert "book_appointment" not in text
     assert "confirm first" in (await h.run("confirm_reschedule")).lower()
@@ -334,22 +334,22 @@ async def test_reschedule_holds_then_confirms_next_turn():
     h.ctx.turn = 3
     assert "confirm_reschedule" in await h.run("book_appointment")
     await h.run("confirm_reschedule")
-    assert h.express.last("reschedule")[0] == ("a1", SLOT, "c1")
+    assert h.backend.last("reschedule")[0] == ("a1", SLOT, "c1")
     assert h.ctx.pending_hold is None
 
 
 async def test_unavailable_maps_to_apology():
     h = verified(Harness())
-    h.express.responses["list_appointments"] = Unavailable(503, "boom")
+    h.backend.responses["list_appointments"] = Unavailable(503, "boom")
     text = await h.run("list_my_appointments", scope="upcoming")
     assert text.startswith(Unavailable.spoken)
-    h.express.responses["specializations"] = Unavailable(503, "boom")
+    h.backend.responses["specializations"] = Unavailable(503, "boom")
     assert (await h.run("list_specializations")).startswith(Unavailable.spoken)
 
 
 async def test_generic_api_error_never_speaks_the_internal_message():
     h = verified(Harness())
-    h.express.responses["list_appointments"] = ApiError(401, "Invalid or missing API key")
+    h.backend.responses["list_appointments"] = BackendError(500, "database error: InternalError")
     text = await h.run("list_my_appointments", scope="upcoming")
     assert text == API_FAILED
     assert "API key" not in text
@@ -357,7 +357,7 @@ async def test_generic_api_error_never_speaks_the_internal_message():
 
 async def test_bad_request_message_is_still_spoken():
     h = verified(Harness())
-    h.express.responses["list_appointments"] = BadRequest(400, "scope must be upcoming or past")
+    h.backend.responses["list_appointments"] = BadRequest(400, "scope must be upcoming or past")
     text = await h.run("list_my_appointments", scope="upcoming")
     assert "scope must be upcoming or past" in text
 
@@ -370,10 +370,10 @@ async def test_list_appointments_spoken_in_clinic_tz():
 
 async def test_resend_confirmation_not_sent():
     h = verified(Harness())
-    h.express.responses["resend_confirmation"] = {"appointmentId": "a1", "sent": False}
+    h.backend.responses["resend_confirmation"] = {"appointmentId": "a1", "sent": False}
     text = await h.run("resend_confirmation", appointment_id="a1")
     assert "couldn't" in text.lower()
-    h.express.responses["resend_confirmation"] = {"appointmentId": "a1", "sent": True}
+    h.backend.responses["resend_confirmation"] = {"appointmentId": "a1", "sent": True}
     assert "sent" in (await h.run("resend_confirmation", appointment_id="a1")).lower()
 
 
@@ -393,14 +393,14 @@ async def test_slots_are_few_and_spoken_in_clinic_tz():
         }
         for i in range(30)
     ]
-    h.express.responses["slots"] = slots
+    h.backend.responses["slots"] = slots
     text = await h.run("get_available_slots", doctor_id="d1", date="2026-11-24")
     assert "9:00 AM" in text and "9:30 AM" in text
     assert "9:15 AM" not in text  # held by someone else
     assert "4:30 AM" not in text and "3:30 AM" not in text  # UTC never spoken
     assert text.count(" AM") + text.count(" PM") <= 5
     assert "2026-11-24T03:30:00Z" in text  # exact start_at for hold_slot
-    assert h.express.last("slots")[0] == ("d1", date(2026, 11, 24), None)
+    assert h.backend.last("slots")[0] == ("d1", date(2026, 11, 24), None)
 
 
 async def test_slots_none_free():
@@ -412,7 +412,7 @@ async def test_slots_none_free():
 async def test_find_doctors_hindi_default_language():
     h = Harness()
     h.ctx.language.force("hi")
-    h.express.responses["search_doctors"] = {
+    h.backend.responses["search_doctors"] = {
         "items": [
             {
                 "id": "d1",
@@ -424,19 +424,19 @@ async def test_find_doctors_hindi_default_language():
         ]
     }
     text = await h.run("find_doctors", specialization="cardiology", city="Pune")
-    _, kwargs = h.express.last("search_doctors")
+    _, kwargs = h.backend.last("search_doctors")
     assert kwargs["language"] == "Hindi" and kwargs["specialization_id"] == 1
     assert kwargs["city"] == "Pune"
     assert "Dr. Meera Rao" in text and "d1" in text
     await h.run("find_doctors", specialization="cardiology", language="English")
-    assert h.express.last("search_doctors")[1]["language"] == "English"
+    assert h.backend.last("search_doctors")[1]["language"] == "English"
 
 
 async def test_find_doctors_verified_uses_patient_session():
     h = verified(Harness())
     await h.run("find_doctors", specialization="Orthopedics")
-    assert "patient_search_doctors" in h.express.names()
-    assert "search_doctors" not in h.express.names()
+    assert "patient_search_doctors" in h.backend.names()
+    assert "search_doctors" not in h.backend.names()
 
 
 async def test_suggest_specialization_lists_live_options():
@@ -451,7 +451,7 @@ async def test_suggest_specialization_red_flag():
     text = await h.run("suggest_specialization", symptoms="crushing chest pain")
     assert "112" in text
     assert h.ctx.emergency is True
-    assert "specializations" not in h.express.names()
+    assert "specializations" not in h.backend.names()
 
 
 async def test_suggest_specialization_red_flag_in_hindi_from_the_caller_utterance():
@@ -465,10 +465,10 @@ async def test_suggest_specialization_red_flag_in_hindi_from_the_caller_utteranc
 
 async def test_clinic_info():
     h = Harness()
-    h.express.responses["call"] = {"items": [DOCTOR_CLINIC]}
+    h.backend.responses["search_clinics"] = {"items": [DOCTOR_CLINIC]}
     text = await h.run("clinic_info", clinic="City Heart")
     assert "12 MG Road" in text and "Pune" in text
-    assert h.express.last("call")[0] == ("GET", "/clinics")
+    assert h.backend.last("search_clinics")[0] == ("City Heart",)
 
 
 DOCTOR_CLINIC = {
@@ -495,7 +495,7 @@ async def test_switch_language_and_end_call():
 async def test_list_prescriptions_uses_verified_id():
     h = verified(Harness())
     text = await h.run("list_prescriptions")
-    assert h.express.last("prescriptions")[0] == ("u1", 3)
+    assert h.backend.last("prescriptions")[0] == ("u1", 3)
     assert "rx1" in text and "Dr. Meera Rao" in text
 
 
@@ -524,7 +524,7 @@ async def test_read_prescription_long_list_never_cuts_an_item():
         "duration": "5 days",
         "instructions": "after food",
     }
-    h.express.responses["prescription"] = {"id": "rx2", "items": [item] * 8}
+    h.backend.responses["prescription"] = {"id": "rx2", "items": [item] * 8}
     text = await h.run("read_prescription", prescription_id="rx2")
     assert "more" in text and "app" in text
     assert text.count("Paracetamol 650 mg") == text.count("after food")
@@ -539,7 +539,7 @@ def test_pending_types_shape():
 async def test_long_ids_are_never_cut_mid_item():
     h = verified(Harness())
     uuid = "0f8fad5b-d9cb-469f-a165-70867728950e"
-    h.express.responses["list_appointments"] = {
+    h.backend.responses["list_appointments"] = {
         "items": [dict(APPOINTMENT, id=f"{uuid[:-1]}{i}") for i in range(3)]
     }
     text = await h.run("list_my_appointments", scope="upcoming")
@@ -552,15 +552,15 @@ async def test_cancel_unavailable_then_book_conflict_releases_hold():
     h = verified(Harness(make_ctx(turn=1)))
     await h.run("prepare_cancel", appointment_id="a1")
     h.ctx.turn = 2
-    h.express.responses["cancel"] = Unavailable(503, "down")
+    h.backend.responses["cancel"] = Unavailable(503, "down")
     assert "list_my_appointments" in await h.run("cancel_appointment")
     assert h.ctx.pending_cancel is not None and h.ctx.pending_cancel.outcome_unknown
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     assert h.ctx.pending_cancel is None  # a new hold replaces any other pending write
     h.ctx.turn = 3
-    h.express.responses["book"] = Conflict(409, "This time slot is no longer available")
+    h.backend.responses["book"] = Conflict(409, "This time slot is no longer available")
     await h.run("book_appointment")
-    assert h.express.last("release_hold")[0] == ("h1",)
+    assert h.backend.last("release_hold")[0] == ("h1",)
     assert h.ctx.pending_hold is None
 
 
@@ -568,28 +568,28 @@ async def test_unknown_outcome_blocks_every_write_until_fresh_prepare():
     h = verified(Harness(make_ctx(turn=1)))
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     h.ctx.turn = 2
-    h.express.responses["book"] = Unavailable(503, "down")
+    h.backend.responses["book"] = Unavailable(503, "down")
     await h.run("book_appointment")
     h.ctx.turn = 3
-    del h.express.responses["book"]
+    del h.backend.responses["book"]
     assert "check your appointments first" in await h.run("book_appointment")
-    assert h.express.names().count("book") == 1
+    assert h.backend.names().count("book") == 1
     # cancel
     await h.run("prepare_cancel", appointment_id="a1")
     h.ctx.turn = 4
-    h.express.responses["cancel"] = Unavailable(503, "down")
+    h.backend.responses["cancel"] = Unavailable(503, "down")
     await h.run("cancel_appointment")
     h.ctx.turn = 5
     assert "check your appointments first" in await h.run("cancel_appointment")
-    assert h.express.names().count("cancel") == 1
+    assert h.backend.names().count("cancel") == 1
     # reschedule
     await h.run("reschedule_appointment", appointment_id="a1", start_at=SLOT.isoformat())
     h.ctx.turn = 6
-    h.express.responses["reschedule"] = Unavailable(503, "down")
+    h.backend.responses["reschedule"] = Unavailable(503, "down")
     await h.run("confirm_reschedule")
     h.ctx.turn = 7
     assert "check your appointments first" in await h.run("confirm_reschedule")
-    assert h.express.names().count("reschedule") == 1
+    assert h.backend.names().count("reschedule") == 1
     # a fresh hold starts over
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     h.ctx.turn = 8
@@ -601,11 +601,11 @@ async def test_one_yes_cannot_trigger_two_writes():
     await h.run("hold_slot", doctor_id="d1", clinic_id="c1", start_at=SLOT.isoformat())
     await h.run("prepare_cancel", appointment_id="a1")
     assert h.ctx.pending_hold is None
-    assert h.express.last("release_hold")[0] == ("h1",)
+    assert h.backend.last("release_hold")[0] == ("h1",)
     h.ctx.turn = 2
     assert "nothing is ready" in (await h.run("book_appointment")).lower()
     await h.run("cancel_appointment")
-    assert "book" not in h.express.names() and h.express.names().count("cancel") == 1
+    assert "book" not in h.backend.names() and h.backend.names().count("cancel") == 1
 
 
 async def test_prepare_registration_clears_other_pending():
@@ -631,4 +631,4 @@ async def test_register_without_prepare_is_refused():
     await h.run("verify_identity", full_name="Rohan Gupta", dob="1995-03-04")
     h.ctx.turn = 2
     assert "prepare_registration" in await h.run("register_patient")
-    assert h.spring.calls == []
+    assert "create_phone_patient" not in h.backend.names()
