@@ -24,7 +24,6 @@ RELAY_URL = "wss://receptionist.test/twilio/relay"
 def settings(**overrides: Any) -> Settings:
     values: dict[str, Any] = {
         "public_base_url": BASE,
-        "jwt_secret": "x" * 32,
         "twilio_auth_token": TOKEN,
         "tts_voice_en": "en-voice-v4",
         "tts_voice_hi": "hi-voice-v4",

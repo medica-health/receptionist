@@ -26,9 +26,8 @@ from receptionist.agent.context import (
 from receptionist.agent.language import emergency_language
 from receptionist.agent.safety import EMERGENCY_MESSAGE, Lang, detect_emergency
 from receptionist.agent.speech import speak_date, speak_time, speak_when
-from receptionist.clients.errors import ApiError, BadRequest, Conflict, NotFound, Unavailable
-from receptionist.clients.express import ExpressClient
-from receptionist.clients.spring import SpringClient
+from receptionist.backend.errors import BackendError, BadRequest, Conflict, NotFound, Unavailable
+from receptionist.backend.store import Backend
 from receptionist.config import Settings
 from receptionist.data.db import PatientDirectory
 from receptionist.data.guards import Guards
@@ -90,8 +89,7 @@ def _utcnow() -> datetime:
 class ToolDeps:
     directory: PatientDirectory
     guards: Guards
-    express: ExpressClient
-    spring: SpringClient
+    backend: Backend
     settings: Settings
     clock: Callable[[], datetime] = _utcnow
 
@@ -147,9 +145,9 @@ def _guarded(fn: Callable[..., Awaitable[str]]) -> Callable[..., Awaitable[str]]
         except (BadRequest, Conflict) as exc:
             log.warning("tool %s failed with status %s", fn.__name__, exc.status)
             return _cap(f"Sorry, that didn't work: {exc.message}")
-        except ApiError as exc:
-            # Never speak other API messages: they can be internal (e.g. "Invalid or
-            # missing API key").
+        except BackendError as exc:
+            # Never speak other backend messages: they can be internal (e.g. a database
+            # error name).
             log.warning("tool %s failed with status %s", fn.__name__, exc.status)
             return API_FAILED
 
@@ -229,7 +227,7 @@ class LanguageArgs(BaseModel):
 
 
 def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
-    ctx.express = deps.express
+    ctx.backend = deps.backend
     settings = deps.settings
     default_tz = settings.default_timezone
 
@@ -268,7 +266,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             if result.save_dob:
                 try:
                     await ctx.patient().update_profile(dob)
-                except ApiError as exc:
+                except BackendError as exc:
                     log.warning("saving DOB after verification failed: %s", exc.status)
             return f"Verified. You're speaking with {first}. Ask how you can help."
         if ctx.verifier.failures > before:
@@ -332,7 +330,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             return CONFIRM_FIRST
         assert ctx.caller_e164 is not None  # checked by _registration_refusal
         # Idempotent on the call SID, so a retry after Unavailable can't create a duplicate.
-        created = await deps.spring.create_phone_patient(
+        created = await deps.backend.create_phone_patient(
             pending.full_name, ctx.caller_e164, idempotency_key=ctx.call_sid
         )
         ctx.pending_registration = None
@@ -342,20 +340,20 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         log.info("registered phone patient caller=%s", mask_phone(ctx.caller_e164))
         try:
             await ctx.patient().update_profile(pending.dob)
-        except ApiError as exc:
+        except BackendError as exc:
             log.warning("saving DOB after registration failed: %s", exc.status)
         return f"Registered and verified as {who.full_name}. Ask how you can help."
 
     # ---------------------------------------------------------- general info
 
     async def list_specializations() -> str:
-        names = [s["name"] for s in await deps.express.specializations()]
+        names = [s["name"] for s in await deps.backend.specializations()]
         if not names:
             return "No specializations are listed right now."
         return "Specializations: " + ", ".join(names) + "."
 
     async def _specialization_id(name: str) -> int | str:
-        specs = await deps.express.specializations()
+        specs = await deps.backend.specializations()
         want = name.strip().lower()
         for test in (
             lambda s: s.lower() == want,
@@ -386,7 +384,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
             if ctx.verified is not None:
                 data = await ctx.patient().search_doctors(spec_id, city, pincode, language, 3)
             else:
-                data = await deps.express.search_doctors(
+                data = await deps.backend.search_doctors(
                     specialization_id=spec_id,
                     city=city,
                     pincode=pincode,
@@ -413,7 +411,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         return _fit("Doctors:", parts)
 
     async def clinic_info(clinic: str) -> str:
-        data = await deps.express.call("GET", "/clinics", params={"q": clinic, "limit": 1})
+        data = await deps.backend.search_clinics(clinic, limit=1)
         found = _items(data)
         if not found:
             return "I couldn't find a clinic by that name."
@@ -435,7 +433,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
                 ctx.language.force("hi")
             message_lang = emergency_language(ctx.language, symptoms, ctx.stt_lang)
             return f"Emergency red flag. Say this now: {EMERGENCY_MESSAGE[message_lang]}"
-        specs = await deps.express.specializations()
+        specs = await deps.backend.specializations()
         text = "Choose 1-2 from this list only; never diagnose."
         for s in specs:
             desc = (s.get("description") or "").strip()
@@ -450,8 +448,9 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
     async def get_available_slots(
         doctor_id: str, date: _dt.date, clinic_id: str | None = None
     ) -> str:
-        slots = await deps.express.slots(doctor_id, date, clinic_id)
-        doctor = await deps.express.doctor(doctor_id)
+        viewer = ctx.verified.id if ctx.verified else None  # their own hold isn't "taken"
+        slots = await deps.backend.slots(doctor_id, date, clinic_id, viewer_id=viewer)
+        doctor = await deps.backend.doctor(doctor_id)
         clinics = {c["id"]: c for c in doctor.get("clinics") or []}
         now = deps.clock()
         free = [s for s in slots if not s.get("held") and _parse(s["startAt"]) > now][:5]
@@ -482,7 +481,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         if hold and hold.hold_id:
             try:
                 await ctx.patient().release_hold(hold.hold_id)
-            except ApiError:
+            except BackendError:
                 pass  # it expires on its own
 
     async def _clear_pending(keep: str | None = None) -> None:
@@ -502,7 +501,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
         old: str | None = None,
     ) -> str:
         session = ctx.patient()
-        doctor = await deps.express.doctor(doctor_id)
+        doctor = await deps.backend.doctor(doctor_id)
         clinic = next((c for c in doctor.get("clinics") or [] if c["id"] == clinic_id), None)
         if clinic is None:
             return "That doctor doesn't practise at that clinic. Check the slots again."
@@ -568,7 +567,7 @@ def build_tools(ctx: CallContext, deps: ToolDeps) -> list[BaseTool]:
                 return TAKEN
             return f"That can't be done: {exc.message}."
         if kind == "hold":
-            ctx.pending_hold = None  # express-api drops the hold once the slot is taken
+            ctx.pending_hold = None  # booking drops the hold once the slot is taken
         else:
             ctx.pending_cancel = None
         return done

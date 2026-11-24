@@ -10,9 +10,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _REQUIRED_OUTSIDE_TEST = (
     "database_url",
     "redis_url",
-    "express_api_url",
-    "spring_api_url",
-    "api_key",
     "twilio_auth_token",
     "anthropic_api_key",
 )
@@ -26,16 +23,20 @@ class Settings(BaseSettings):
     public_base_url: str
     database_url: str | None = None
     redis_url: str | None = None
-    express_api_url: str | None = None
-    spring_api_url: str | None = None
-    api_key: str | None = None
-
-    jwt_secret: str = Field(min_length=32)
-    jwt_issuer: str = "cdac-auth"
-    jwt_audience: str = "cdac-api"
+    # Same Redis keys and TTLs as express-api: holds and the slot cache are shared with it.
+    slot_hold_ttl_seconds: int = Field(300, ge=30, le=900)
+    slot_cache_ttl_seconds: int = Field(60, ge=5, le=3600)
 
     twilio_account_sid: str | None = None
     twilio_auth_token: str | None = None
+    # Appointment confirmations. SMS goes to phone-registered patients; email (Resend) to the
+    # rest and to doctors. Unset means the message is only logged (SKIPPED).
+    twilio_sms_from: str | None = None
+    twilio_messaging_service_sid: str | None = None
+    resend_api_key: str | None = None
+    mail_from: str = "MediCare <onboarding@resend.dev>"
+    mail_reply_to: str | None = None
+    app_base_url: str = "http://localhost:3000"
     anthropic_api_key: str | None = None
     llm_model: str = "claude-opus-5-5"
     default_timezone: str = "Asia/Kolkata"

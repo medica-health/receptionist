@@ -5,7 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Literal
 
 DependencyStatus = Literal["up", "down", "disabled"]
-DEPENDENCIES = ("postgres", "redis", "express", "spring")
+DEPENDENCIES = ("postgres", "redis")
 
 Probe = Callable[[], Awaitable[bool]]
 

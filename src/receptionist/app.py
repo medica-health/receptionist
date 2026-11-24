@@ -25,8 +25,7 @@ class AppDeps:
     settings: Any = None
     directory: Any = None  # PatientDirectory (Task 3)
     guards: Any = None  # Guards (Task 3)
-    express: Any = None  # Express client (Task 5)
-    spring: Any = None  # Spring client (Task 5)
+    backend: Any = None  # Backend: bookings, doctors, registration over Postgres + Redis
     llm_factory: Any = None  # Callable[[], BaseChatModel] (Task 9)
     health: Any = None  # HealthChecker or anything with async status()
     startup: Any = None  # async () -> None, run when the app starts (build_deps sets it)

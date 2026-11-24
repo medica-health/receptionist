@@ -165,12 +165,12 @@ class FakePatientSession:
         )
 
 
-class FakeExpress(Recorder):
+class FakeBackend(Recorder):
     async def specializations(self):
         return await self._do("specializations", SPECIALIZATIONS)
 
     async def search_doctors(
-        self, specialization_id=None, city=None, pincode=None, language=None, limit=5, token=None
+        self, specialization_id=None, city=None, pincode=None, language=None, limit=5
     ):
         return await self._do(
             "search_doctors",
@@ -182,21 +182,19 @@ class FakeExpress(Recorder):
             limit=limit,
         )
 
-    async def slots(self, doctor_id, date, clinic_id=None):
+    async def slots(self, doctor_id, date, clinic_id=None, viewer_id=None):
         return await self._do("slots", [], doctor_id, date, clinic_id)
 
     async def doctor(self, doctor_id):
         return await self._do("doctor", DOCTOR, doctor_id)
 
-    async def call(self, method, path, token=None, params=None, json=None):
-        return await self._do("call", {"items": []}, method, path, params=params)
+    async def search_clinics(self, q, limit=1):
+        return await self._do("search_clinics", {"items": []}, q, limit=limit)
 
     def as_patient(self, user_id, email, name):
         self.calls.append(("as_patient", (user_id, email, name), {}))
         return FakePatientSession(self, user_id)
 
-
-class FakeSpring(Recorder):
     async def create_phone_patient(self, full_name, phone_e164, idempotency_key):
         return await self._do(
             "create_phone_patient",
@@ -270,8 +268,7 @@ def make_deps(guards: FakeGuards | None = None, clock: Callable[[], datetime] = 
     return ToolDeps(
         directory=FakeDirectory(),
         guards=guards or FakeGuards(),
-        express=FakeExpress(),
-        spring=FakeSpring(),
+        backend=FakeBackend(),
         settings=Settings(),
         clock=clock,
     )
@@ -286,12 +283,8 @@ class Harness:
         self.tools = build_tools(self.ctx, self.deps)
 
     @property
-    def express(self) -> FakeExpress:
-        return self.deps.express  # type: ignore[return-value]
-
-    @property
-    def spring(self) -> FakeSpring:
-        return self.deps.spring  # type: ignore[return-value]
+    def backend(self) -> FakeBackend:
+        return self.deps.backend  # type: ignore[return-value]
 
     @property
     def guards(self) -> FakeGuards:
@@ -397,7 +390,6 @@ def make_app_deps(
         settings=Settings(),
         directory=directory or FakeDirectory(candidates),
         guards=guards or FakeGuards(),
-        express=FakeExpress(),
-        spring=FakeSpring(),
+        backend=FakeBackend(),
         llm_factory=lambda: model,
     )

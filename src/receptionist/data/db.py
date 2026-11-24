@@ -1,4 +1,5 @@
-"""Read-only patient lookup against the shared Postgres (auth + app schemas)."""
+"""Caller lookup against the shared Postgres (auth + app schemas). Owns the connection pool,
+which the backend shares."""
 
 from psycopg_pool import AsyncConnectionPool
 
@@ -16,7 +17,11 @@ SELECT u.id::text, u.full_name, u.email, p.date_of_birth
 
 class PatientDirectory:
     def __init__(self, database_url: str) -> None:
-        self._pool = AsyncConnectionPool(database_url, min_size=1, max_size=5, open=False)
+        self._pool = AsyncConnectionPool(database_url, min_size=1, max_size=10, open=False)
+
+    @property
+    def pool(self) -> AsyncConnectionPool:
+        return self._pool
 
     async def open(self) -> None:
         await self._pool.open()

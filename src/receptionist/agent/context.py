@@ -7,7 +7,7 @@ from langchain_core.tools import ToolException
 
 from receptionist.agent.language import LanguageTracker
 from receptionist.agent.safety import Lang
-from receptionist.clients.express import ExpressClient, PatientSession
+from receptionist.backend.store import Backend, PatientSession
 from receptionist.identity.verify import Candidate, Verifier
 
 
@@ -15,7 +15,7 @@ from receptionist.identity.verify import Candidate, Verifier
 class PendingHold:
     """A slot read back to the caller, waiting for their yes (book, or reschedule when
     `appointment_id` is set). `turn` is the turn it was created in. `outcome_unknown` is set
-    when the write was attempted but express-api didn't answer: it must not be retried."""
+    when the write was attempted but its outcome is unknown: it must not be retried."""
 
     doctor_id: str
     clinic_id: str
@@ -67,7 +67,7 @@ class CallContext:
     stt_lang: str | None = None
     utterance_lang: Lang = "en"
     # Bound by build_tools; used to build the patient session.
-    express: ExpressClient | None = field(default=None, repr=False)
+    backend: Backend | None = field(default=None, repr=False)
     _session: PatientSession | None = field(default=None, repr=False)
 
     def mark_emergency(self) -> None:
@@ -75,12 +75,12 @@ class CallContext:
         self.emergency_turn = self.turn
 
     def patient(self) -> PatientSession:
-        """The express-api session of the verified caller. Fails closed when not verified."""
+        """The backend session of the verified caller. Fails closed when not verified."""
         if self.verified is None:
             raise ToolException("not verified")
-        if self.express is None:
-            raise RuntimeError("CallContext.express is not bound")
+        if self.backend is None:
+            raise RuntimeError("CallContext.backend is not bound")
         if self._session is None:
             v = self.verified
-            self._session = self.express.as_patient(v.id, v.email, v.full_name)
+            self._session = self.backend.as_patient(v.id, v.email, v.full_name)
         return self._session
